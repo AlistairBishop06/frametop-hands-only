@@ -176,7 +176,7 @@ def doctor():
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="framehands")
     parser.add_argument("command", choices=("start", "stop", "restart", "status", "enable", "disable",
-                                            "gestures", "logs", "doctor", "sync", "run-tracker", "run-camd", "run-view", "run-input", "run-dashboard"))
+                                            "gestures", "logs", "doctor", "sync", "run-tracker", "run-camd", "run-view", "run-input", "run-dashboard", "register-dashboard"))
     args = parser.parse_args(argv)
     cmd = args.command
     try:
@@ -196,6 +196,9 @@ def main(argv=None):
         elif cmd == "run-dashboard":
             binary = str(ROOT / "dashboard/build/framehands-dashboard")
             os.execv(binary, (binary,))
+        elif cmd == "register-dashboard":
+            binary = str(ROOT / "dashboard/build/framehands-dashboard")
+            os.execv(binary, (binary, "--register"))
         elif cmd == "enable":
             set_config("TRACKING", "1")
             set_config("AUTO_START", "1")

@@ -108,3 +108,24 @@ personal calibration are still recommended.
 After publishing an ARM64 release, update the Frame using `git pull` and
 `./install.sh` from a source-only checkout, then restart SteamVR normally. The
 installer registers the overlay with SteamVR on its next launch.
+
+## On-demand dashboard app (+ menu)
+
+FrameHands is registered with SteamVR by a quick **oneshot** user service. The
+service does **not** launch the overlay UI automatically. Open the SteamVR
+Dashboard, press **+**, and select **FrameHands** to launch the controls.
+
+Use the ON/OFF button to set tracking, then press the **X** at the top-right
+of the panel to close it. You can also leave the panel by selecting another
+dashboard tab or dismissing the dashboard; the panel exits and its tab disappears.
+The ON/OFF selection is saved in `~/.config/framehands/config` and remains in
+effect after the UI exits. Tracking is still auto-started by SteamVR when enabled.
+
+The small `framehands-dashboard.service` now registers the app, rather than
+keeping it open. The `framehands-dashboard` binary is launched only when
+SteamVR launches the manifest from **+**. On an existing installation, install
+a new published ARM64 release and restart SteamVR to replace the old service.
+
+**Important:** Disabling hand tracking also disables the hand pointer. You
+will need a physical controller or SSH (`framehands enable`) to switch it back
+on. The settings persist even if the panel is closed while changing them.

@@ -97,5 +97,20 @@ class FrameHandsTest(unittest.TestCase):
         self.assertIn(("disable", cli.UNITS[1]), actions)
 
 
+    def test_dashboard_is_registered_but_not_autolaunched(self):
+        service = (ROOT / "services/framehands-dashboard.service").read_text()
+        self.assertIn("Type=oneshot", service)
+        self.assertIn("ExecStart=@ROOT@/framehands register-dashboard", service)
+        self.assertNotIn("ExecStart=@ROOT@/framehands run-dashboard\n", service)
+        self.assertIn("register-dashboard", (ROOT / "framehands").read_text())
+
+    def test_dashboard_can_be_closed_without_disabling_tracking(self):
+        cpp = (ROOT / "dashboard/framehands-dashboard.cpp").read_text()
+        self.assertIn("vr::VREvent_OverlayClosed", cpp)
+        self.assertIn("vr::VREvent_OverlayHidden && wasActive", cpp)
+        self.assertIn("ShowDashboard(\"framehands.dashboard\")", cpp)
+        self.assertIn("running = false", cpp)
+
+
 if __name__ == "__main__":
     unittest.main()

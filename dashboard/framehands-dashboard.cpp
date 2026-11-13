@@ -1,5 +1,6 @@
-// Small standalone SteamVR dashboard overlay; no Qt, browser or desktop needed.
-// Its systemd unit survives disabling the four hand-tracking services.
+// On-demand SteamVR dashboard overlay, launched from the + menu.
+// A separate oneshot systemd unit registers the app; this UI is never auto-started.
+// Closing the UI destroys the overlay but does NOT change hand-tracking settings.
 #include <openvr.h>
 #include <algorithm>
 #include <array>
@@ -113,6 +114,12 @@ bool Enabled() {
 void Paint(bool enabled, bool busy, bool failed) {
     Rect(0, 0, W, H, {13, 22, 38});
     Rect(0, 0, W, 10, {73, 175, 235});
+    // The X is separate from the toggle: closing never disables tracking.
+    Rect(566, 22, 628, 94, {44, 62, 83});
+    for (int i = 0; i < 23; ++i) {
+        Rect(581 + i, 43 + i, 585 + i, 47 + i, {232, 244, 255});
+        Rect(603 - i, 43 + i, 607 - i, 47 + i, {232, 244, 255});
+    }
     Text("FRAMEHANDS", 39, 5, {232, 244, 255});
     Text("HAND TRACKING", 116, 3, {176, 198, 219});
     const RGB action = enabled ? RGB{30, 130, 98} : RGB{45, 123, 195};
@@ -179,11 +186,32 @@ int main(int argc, char **argv) {
     auto next = std::chrono::steady_clock::now();
     Paint(enabled, busy, failed);
     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+    // Opening FrameHands from + selects this panel immediately.
+    vr::VROverlay()->ShowDashboard("framehands.dashboard");
     bool running = true;
+    bool wasActive = false;
     while (running) {
         vr::VREvent_t event{};
-        while (vr::VROverlay()->PollNextOverlayEvent(mainOverlay, &event, sizeof event)) {
+        while (running && vr::VROverlay()->PollNextOverlayEvent(mainOverlay, &event, sizeof event)) {
+            if (event.eventType == vr::VREvent_OverlayClosed ||
+                event.eventType == vr::VREvent_Quit) {
+                running = false;
+                break;
+            }
+            if (event.eventType == vr::VREvent_OverlayHidden && wasActive) {
+                // Leaving this panel removes it from the dashboard tab bar.
+                running = false;
+                break;
+            }
             if (event.eventType == vr::VREvent_MouseButtonDown && !busy) {
+                const float x = event.data.mouse.x;
+                const float y = event.data.mouse.y;
+                // Accept both OpenVR's mouse-coordinate orientations for the X.
+                if (x >= 566 && x <= 628 && (y <= 100 || y >= H - 100)) {
+                    running = false;
+                    break;
+                }
+                // Otherwise preserve the original full-panel toggle behaviour.
                 const bool toEnable = !enabled;
                 child = fork();
                 if (child == 0) {
@@ -198,7 +226,10 @@ int main(int argc, char **argv) {
             }
         }
         while (vr::VRSystem()->PollNextEvent(&event, sizeof event))
-            if (event.eventType == vr::VREvent_Quit) running = false;
+            if (event.eventType == vr::VREvent_Quit ||
+                event.eventType == vr::VREvent_OverlayClosed) running = false;
+        if (vr::VROverlay()->IsActiveDashboardOverlay(mainOverlay)) wasActive = true;
+        if (!running) break;
         if (child > 0) {
             int status = 0;
             const pid_t done = waitpid(child, &status, WNOHANG);
