@@ -395,9 +395,10 @@ also enabled. You can also run `~/.local/bin/framehands touch-on` or
 hand interpolation and laser aim; it cannot recover missing camera data.
 For direct touch, FrameHands checks visible, known overlays using OpenVR's
 `ComputeOverlayIntersection`. When a fingertip approaches the overlay, it
-switches the pointer to a fingertip ray and sends a click with contact/release
-hysteresis. The helper probes known Valve dashboard and desktop overlay keys (including
-`system.desktop.1`) and uses the compositor's 3D intersection; arbitrary
+tests a short ray through the fingertip along the panel's surface normal,
+then sends a click with contact/release hysteresis. The helper probes known
+Valve dashboard and desktop overlay keys (including `system.desktop.1`),
+plus overlays seen in SteamVR events, and uses the compositor's 3D intersection; arbitrary
 third-party panels still require overlay discovery or integration, so touch
 is **not** claimed to work everywhere yet. If a panel's overlay key is known,
 add it to `HANDS_TOUCH_OVERLAY_KEYS` in the config and run
