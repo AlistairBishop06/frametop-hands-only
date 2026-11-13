@@ -168,12 +168,14 @@ int main() {
     bool smoothPointer = handcut::Setting("HANDS_POINTER_SMOOTH", "1") != "0";
     bool floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
     bool touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
+    bool touchDebug = handcut::Setting("HANDS_TOUCH_DEBUG", "0") == "1";
     int smoothness = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
     int64_t nextSettings = 0;
     int64_t nextOverlayScan = 0;
     std::vector<std::string> overlayKeys;
     bool touchPressed = false;
     int64_t touchReleaseAt = 0;
+    int64_t nextTouchReport = 0;
     int owner = -1;
     bool showing = false, pressed = false, initialized[2]{};
     uint32_t begins[2]{};
@@ -197,6 +199,7 @@ int main() {
             smoothPointer = handcut::Setting("HANDS_POINTER_SMOOTH", "1") != "0";
             floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
             touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
+            touchDebug = handcut::Setting("HANDS_TOUCH_DEBUG", "0") == "1";
             smoothness = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
         }
         vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
@@ -256,24 +259,59 @@ int main() {
                 // visible spot directly under the tracked fingertip.
                 const V towardTip = tipRange > 0.12 ? fromHeadToTip * (1.0 / tipRange) : dir;
                 bool touching = false;
+                int found = 0, visible = 0, intersections = 0;
+                double closestGap = 1e9;
+                std::string closestOverlay = "none";
                 if (touchOn && tipRange > 0.12 && !g.down) {
                     vr::VROverlayIntersectionParams_t query{};
                     query.eOrigin = vr::TrackingUniverseRawAndUncalibrated;
                     const V head = Position(poses[0].mDeviceToAbsoluteTracking);
                     query.vSource = {{float(head.x), float(head.y), float(head.z)}};
                     query.vDirection = {{float(towardTip.x), float(towardTip.y), float(towardTip.z)}};
+
+                    // The currently focused panel is more reliable than trying
+                    // to guess every gamescope overlay's unique Steam app id.
+                    // Also check discovered keys for panels that have not yet
+                    // been selected with a controller/laser.
+                    const vr::VROverlayHandle_t focus = vr::VROverlay()->GetGamepadFocusOverlay();
+                    auto probe = [&](vr::VROverlayHandle_t target, const std::string &key) {
+                        if (target == vr::k_ulOverlayHandleInvalid) return;
+                        ++found;
+                        if (!vr::VROverlay()->IsOverlayVisible(target)) return;
+                        ++visible;
+                        vr::VROverlayIntersectionResults_t hit{};
+                        if (!vr::VROverlay()->ComputeOverlayIntersection(target, &query, &hit)) return;
+                        ++intersections;
+                        const double gap = double(hit.fDistance) - tipRange;
+                        if (std::abs(gap) < std::abs(closestGap)) {
+                            closestGap = gap;
+                            closestOverlay = key;
+                        }
+                        // Original activation required <22 mm depth error.
+                        // Stereo triangulation and filtered hand prediction may
+                        // vary by centimetres. Use a generous contact zone plus
+                        // a larger release zone to avoid repeated clicks.
+                        if (gap >= -0.040 && gap <= (touchPressed ? 0.090 : 0.050))
+                            touching = true;
+                    };
+                    if (focus != vr::k_ulOverlayHandleInvalid) {
+                        char focusKey[256] = {};
+                        vr::VROverlay()->GetOverlayKey(focus, focusKey, sizeof(focusKey));
+                        probe(focus, focusKey[0] ? focusKey : "[focused overlay]");
+                    }
                     for (const std::string &key : overlayKeys) {
                         vr::VROverlayHandle_t target = vr::k_ulOverlayHandleInvalid;
                         if (vr::VROverlay()->FindOverlay(key.c_str(), &target) != vr::VROverlayError_None ||
-                            !vr::VROverlay()->IsOverlayVisible(target)) continue;
-                        vr::VROverlayIntersectionResults_t hit{};
-                        if (vr::VROverlay()->ComputeOverlayIntersection(target, &query, &hit)) {
-                            const double gap = double(hit.fDistance) - tipRange;
-                            if (gap >= -0.018 && gap <= (touchPressed ? 0.055 : 0.022)) {
-                                touching = true;
-                                break;
-                            }
-                        }
+                            target == focus) continue;
+                        probe(target, key);
+                    }
+                    if (touchDebug && now >= nextTouchReport) {
+                        nextTouchReport = now + 1'000'000'000ll;
+                        std::fprintf(stderr,
+                                     "fh-input touch: keys=%zu found=%d visible=%d intersections=%d closest=%s gap=%+.3fm press=%d\n",
+                                     overlayKeys.size(), found, visible, intersections, closestOverlay.c_str(),
+                                     intersections ? closestGap : 99.0, int(touching));
+                        std::fflush(stderr);
                     }
                 }
                 // Aim *through* the fingertip when touching, instead of using
