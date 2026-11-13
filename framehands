@@ -58,7 +58,7 @@ def selected():
     if cfg.get("TRACKING", "1") == "0":
         return ()
     return (UNITS[:2] + ((UNITS[2],) if cfg.get("RENDER", "1") != "0" else ()) +
-            ((UNITS[3],) if cfg.get("GESTURE_INPUT", "0") == "1" else ()))
+            ((UNITS[3],) if cfg.get("GESTURE_INPUT", "0") == "1" or cfg.get("HANDS_TOUCH", "0") == "1" else ()))
 
 
 def tracker_args():
@@ -245,6 +245,13 @@ def main(argv=None):
             return watchdog()
         elif cmd in ("touch-on", "touch-off"):
             set_config("HANDS_TOUCH", "1" if cmd == "touch-on" else "0")
+            # Direct touch runs in fh-input. Enable/start it when this option is
+            # selected, and release it when neither touch nor gestures needs it.
+            sync_enabled()
+            if UNITS[3] not in selected():
+                ctl("stop", UNITS[3], check=True)
+            elif config().get("AUTO_START", "1") != "0" and active("steamvr.service"):
+                ctl("start", UNITS[3], check=True)
             print("Direct touch:", "on" if cmd == "touch-on" else "off")
         elif cmd == "smoothness":
             if args.value is None or not args.value.isdecimal() or int(args.value) > 100:

@@ -61,6 +61,8 @@ class FrameHandsTest(unittest.TestCase):
             self.assertEqual(cli.selected(), cli.UNITS[:2])
         with patch.object(cli, "config", return_value={"TRACKING": "1", "RENDER": "0", "GESTURE_INPUT": "1"}):
             self.assertEqual(cli.selected(), cli.UNITS[:2] + ("framehands-input.service",))
+        with patch.object(cli, "config", return_value={"TRACKING": "1", "RENDER": "0", "HANDS_TOUCH": "1"}):
+            self.assertEqual(cli.selected(), cli.UNITS[:2] + ("framehands-input.service",))
         with patch.object(cli, "config", return_value={"TRACKING": "0"}):
             self.assertEqual(cli.selected(), ())
 

@@ -104,7 +104,8 @@ bool PhysicalControllerBusy(const vr::TrackedDevicePose_t *poses, const handcut:
 std::vector<std::string> TouchOverlayKeys() {
     std::vector<std::string> keys = {
         "framehands.dashboard", "system.desktop.1", "system.desktop.2",
-        "system.settings", "valve.steam.desktop", "valve.steam.bigpicture"
+        "system.settings", "valve.steam.desktop", "valve.steam.bigpicture",
+        "valve.steam.gamepadui.bootstrapper"
     };
     auto add = [&](const std::string &key) {
         if (!key.empty() && key.size() < 160 && keys.size() < 64 &&
@@ -121,6 +122,7 @@ std::vector<std::string> TouchOverlayKeys() {
     const std::filesystem::path base(home);
     for (const auto &path : {
              base / ".config/openvr/config/steamvr.vrsettings",
+             base / ".local/share/Steam/config/steamvr.vrsettings",
              base / ".local/share/Steam/logs/console_log.txt"
          }) {
         std::ifstream stream(path, std::ios::binary);
@@ -134,7 +136,7 @@ std::vector<std::string> TouchOverlayKeys() {
         if (!stream.read(content.data(), static_cast<std::streamsize>(count))) continue;
 
         const std::string lastKey = "lastAccessedExternalOverlayKey";
-        if (const auto i = content.find(lastKey); i != std::string::npos) {
+        if (const auto i = content.rfind(lastKey); i != std::string::npos) {
             const auto colon = content.find(':', i + lastKey.size());
             if (colon != std::string::npos) {
                 const auto q1 = content.find('"', colon + 1);
@@ -142,14 +144,22 @@ std::vector<std::string> TouchOverlayKeys() {
                 if (q1 != std::string::npos && q2 != std::string::npos) add(content.substr(q1 + 1, q2 - q1 - 1));
             }
         }
-        const std::string prefix = "valve.steam.desktopgame.";
-        size_t i = 0;
-        while ((i = content.find(prefix, i)) != std::string::npos) {
-            const size_t begin = i;
-            i += prefix.size();
-            const size_t digits = i;
-            while (i < content.size() && content[i] >= '0' && content[i] <= '9') ++i;
-            if (i > digits) add(content.substr(begin, i - begin));
+        // Gamescope's OpenVR backend creates keys under gamescope.<display>.
+        // Float-in-world panels can use these instead of the dashboard keys.
+        for (const std::string prefix : {"valve.steam.desktopgame.", "gamescope."}) {
+            size_t i = 0;
+            while ((i = content.find(prefix, i)) != std::string::npos) {
+                const size_t begin = i;
+                i += prefix.size();
+                const size_t suffix = i;
+                while (i < content.size() &&
+                       ((content[i] >= '0' && content[i] <= '9') ||
+                        (prefix == "gamescope." &&
+                         ((content[i] >= 'a' && content[i] <= 'z') ||
+                          (content[i] >= 'A' && content[i] <= 'Z') ||
+                          content[i] == '_' || content[i] == '-' || content[i] == '.')))) ++i;
+                if (i > suffix) add(content.substr(begin, i - begin));
+            }
         }
     }
     return keys;

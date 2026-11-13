@@ -186,6 +186,7 @@ Common settings:
 | `TRACKING` | `1` | Enable or disable hand tracking. |
 | `RENDER` | `1` | Display the 3D hand overlays. |
 | `GESTURE_INPUT` | `0` | Enable the virtual pointer for the SteamVR dashboard. |
+| `HANDS_TOUCH` | `0` | Enable fingertip contact on supported SteamVR overlays; also starts the virtual pointer. |
 | `HANDS_POINTER_SMOOTH` | `1` | Adaptive smoothing of the dashboard ray; `0` disables it. |
 | `HANDS_PINCH_BEGIN` | `0.025` | Index-pinch activation distance in **metres** (25 mm). |
 | `HANDS_PINCH_DIP` | `0` | Optional near-contact fast-tap detection; may increase false clicks. |
@@ -387,15 +388,20 @@ if you do not want a virtual pointer outside the dashboard.
 The FrameHands panel now includes **Direct Touch** (default off) and a
 **Smoothness** slider (0–100, default 50). Both settings persist in
 `~/.config/framehands/config` and update live without restarting camera
-tracking. Smoothness affects the rendered hand interpolation and laser aim;
-it cannot recover missing camera data. For direct touch, FrameHands currently
-checks its **own** visible dashboard overlay using OpenVR's
+tracking. Enabling Direct Touch starts the input service even when
+`GESTURE_INPUT=0`; disabling it stops that service unless gesture input is
+also enabled. You can also run `~/.local/bin/framehands touch-on` or
+`~/.local/bin/framehands touch-off` over SSH. Smoothness affects the rendered
+hand interpolation and laser aim; it cannot recover missing camera data.
+For direct touch, FrameHands checks visible, known overlays using OpenVR's
 `ComputeOverlayIntersection`. When a fingertip approaches the overlay, it
 switches the pointer to a fingertip ray and sends a click with contact/release
 hysteresis. The helper probes known Valve dashboard and desktop overlay keys (including
 `system.desktop.1`) and uses the compositor's 3D intersection; arbitrary
 third-party panels still require overlay discovery or integration, so touch
-is **not** claimed to work everywhere yet. Pinch-at-distance
+is **not** claimed to work everywhere yet. If a panel's overlay key is known,
+add it to `HANDS_TOUCH_OVERLAY_KEYS` in the config and run
+`~/.local/bin/framehands restart`. Pinch-at-distance
 is unchanged.
 
 `AUTO_RECOVER=1` (default) runs a lightweight watchdog under SteamVR. The

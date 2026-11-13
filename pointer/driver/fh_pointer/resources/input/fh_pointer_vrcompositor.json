@@ -231,24 +231,6 @@
 		"/actions/lasermouse_secondary": {
 			"sources": [
 				{
-					"path": "/user/hand/left/input/trigger",
-					"mode": "button",
-					"inputs": {
-						"click": {
-							"output": "/actions/lasermouse_secondary/in/switchlaserhand"
-						}
-					}
-				},
-				{
-					"path": "/user/hand/right/input/trigger",
-					"mode": "button",
-					"inputs": {
-						"click": {
-							"output": "/actions/lasermouse_secondary/in/switchlaserhand"
-						}
-					}
-				},
-				{
 					"path": "/user/hand/left/input/a",
 					"mode": "button",
 					"inputs": {
@@ -259,15 +241,6 @@
 				},
 				{
 					"path": "/user/hand/right/input/a",
-					"mode": "button",
-					"inputs": {
-						"click": {
-							"output": "/actions/lasermouse_secondary/in/switchlaserhand"
-						}
-					}
-				},
-				{
-					"path": "/user/treadmill/input/trigger",
 					"mode": "button",
 					"inputs": {
 						"click": {
