@@ -48,6 +48,24 @@ class ControlTests(unittest.TestCase):
             self.assertIn(("start", cli.UNITS[3]), commands)
             self.assertNotIn(("stop", cli.UNITS[3]), commands)
 
+    def test_visuals_toggle_only_starts_and_stops_the_view(self):
+        commands = []
+        def fake_ctl(*args, **_kwargs):
+            commands.append(args)
+            return SimpleNamespace(returncode=0, stderr="")
+        with tempfile.TemporaryDirectory() as tmp, patch.object(cli, "CONFIG", Path(tmp)/"config"), \
+             patch.object(cli, "ctl", side_effect=fake_ctl), patch.object(cli, "active", return_value=True):
+            cli.CONFIG.write_text("TRACKING=1\nGESTURE_INPUT=1\nRENDER=1\n")
+            self.assertEqual(cli.main(["visuals-off"]), 0)
+            self.assertEqual(cli.config()["RENDER"], "0")
+            self.assertIn(("stop", cli.UNITS[2]), commands)
+            self.assertNotIn(("stop", cli.UNITS[1]), commands)
+            self.assertNotIn(("stop", cli.UNITS[3]), commands)
+            commands.clear()
+            self.assertEqual(cli.main(["visuals-on"]), 0)
+            self.assertEqual(cli.config()["RENDER"], "1")
+            self.assertIn(("start", cli.UNITS[2]), commands)
+
     def test_click_is_not_also_bound_to_switch_laser_hand(self):
         path = ROOT / "pointer/driver/fh_pointer/resources/input/fh_pointer_vrcompositor.json"
         bindings = json.loads(path.read_text())["bindings"]

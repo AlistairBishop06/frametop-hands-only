@@ -220,7 +220,7 @@ def watchdog():
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="framehands")
     parser.add_argument("command", choices=("start", "stop", "restart", "status", "enable", "disable",
-                                            "gestures", "logs", "doctor", "sync", "run-tracker", "run-camd", "run-view", "run-input", "run-dashboard", "register-dashboard", "touch-on", "touch-off", "smoothness", "run-watchdog"))
+                                            "gestures", "logs", "doctor", "sync", "run-tracker", "run-camd", "run-view", "run-input", "run-dashboard", "register-dashboard", "touch-on", "touch-off", "visuals-on", "visuals-off", "smoothness", "run-watchdog"))
     parser.add_argument("value", nargs="?", help="smoothness 0..100")
     args = parser.parse_args(argv)
     cmd = args.command
@@ -253,6 +253,15 @@ def main(argv=None):
             elif config().get("AUTO_START", "1") != "0" and active("steamvr.service"):
                 ctl("start", UNITS[3], check=True)
             print("Direct touch:", "on" if cmd == "touch-on" else "off")
+        elif cmd in ("visuals-on", "visuals-off"):
+            on = cmd == "visuals-on"
+            set_config("RENDER", "1" if on else "0")
+            sync_enabled()
+            if not on:
+                ctl("stop", UNITS[2], check=True)
+            elif config().get("AUTO_START", "1") != "0" and UNITS[2] in selected() and active("steamvr.service"):
+                ctl("start", UNITS[2], check=True)
+            print("Hand visuals:", "on" if on else "off")
         elif cmd == "smoothness":
             if args.value is None or not args.value.isdecimal() or int(args.value) > 100:
                 raise RuntimeError("usage: framehands smoothness 0..100")

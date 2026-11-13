@@ -94,9 +94,12 @@ Open the SteamVR dashboard, press **+**, choose **Launch Application**, and sele
 FrameHands is designed to behave like an on-demand dashboard application rather than a permanent taskbar tab.
 
 1. Open SteamVR's dashboard and select **+ → Launch Application → FrameHands**.
-2. Select the large **ON/OFF** control to enable or disable tracking.
-3. Press the **X** in the panel's top-right corner to close it. You can also leave the panel by switching dashboard tabs.
-4. The panel closes, but the tracking selection is retained in `~/.config/framehands/config` and the appropriate services remain in their selected state.
+2. Use **Hand Tracking** for cameras and tracking, **Hand Visuals** for the white 3D hands, and **Direct Touch** for fingertip clicks. The visuals switch leaves tracking and hand input running.
+3. Adjust **Smoothness** if you want steadier hand motion and pointer aim.
+4. Press the **X** in the panel's top-right corner to close it. You can also leave the panel by switching dashboard tabs. The selections remain in `~/.config/framehands/config`.
+
+From SSH, `~/.local/bin/framehands visuals-off` hides the white hands and
+`~/.local/bin/framehands visuals-on` shows them again without restarting tracking.
 
 The lightweight `framehands-dashboard.service` is a **oneshot registration service**, not a permanently visible control panel. An **inactive** dashboard registration unit after it has run successfully is therefore not necessarily an error.
 
@@ -184,7 +187,7 @@ Common settings:
 | --- | --- | --- |
 | `AUTO_START` | `1` | Start selected tracking services with SteamVR. |
 | `TRACKING` | `1` | Enable or disable hand tracking. |
-| `RENDER` | `1` | Display the 3D hand overlays. |
+| `RENDER` | `1` | Display the white 3D hand overlays; the Hand Visuals control changes this live. |
 | `GESTURE_INPUT` | `0` | Enable the virtual pointer for the SteamVR dashboard. |
 | `HANDS_TOUCH` | `0` | Enable fingertip contact on supported SteamVR overlays; also starts the virtual pointer. |
 | `HANDS_POINTER_SMOOTH` | `1` | Adaptive smoothing of the dashboard ray; `0` disables it. |
@@ -385,8 +388,8 @@ panel's existing SteamVR laser-mouse support and has not been verified on every
 floating overlay implementation. Disable it with `HANDS_FLOATING_POINTER=0`
 if you do not want a virtual pointer outside the dashboard.
 
-The FrameHands panel now includes **Direct Touch** (default off) and a
-**Smoothness** slider (0–100, default 50). Both settings persist in
+The FrameHands panel includes **Hand Visuals** (default on), **Direct Touch**
+(default off), and a **Smoothness** slider (0–100, default 50). The settings persist in
 `~/.config/framehands/config` and update live without restarting camera
 tracking. Enabling Direct Touch starts the input service even when
 `GESTURE_INPUT=0`; disabling it stops that service unless gesture input is
