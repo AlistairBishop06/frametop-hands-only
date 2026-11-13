@@ -14,6 +14,12 @@
 #include <cstdio>
 #include <cstring>
 #include <thread>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <cstdlib>
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -91,6 +97,64 @@ bool PhysicalControllerBusy(const vr::TrackedDevicePose_t *poses, const handcut:
 }
 }
 
+// Steam Frame's floated gamescope panels use keys such as
+// valve.steam.desktopgame.<appid>, not only system.desktop.1. SteamVR does not
+// provide public enumeration of every overlay, so discover keys in SteamVR's
+// own settings and recent Steam client log, plus optional user-supplied keys.
+std::vector<std::string> TouchOverlayKeys() {
+    std::vector<std::string> keys = {
+        "framehands.dashboard", "system.desktop.1", "system.desktop.2",
+        "system.settings", "valve.steam.desktop", "valve.steam.bigpicture"
+    };
+    auto add = [&](const std::string &key) {
+        if (!key.empty() && key.size() < 160 && keys.size() < 64 &&
+            std::find(keys.begin(), keys.end(), key) == keys.end())
+            keys.push_back(key);
+    };
+    // Allows users to target another app's known overlay key without rebuilding.
+    std::istringstream extra(handcut::Setting("HANDS_TOUCH_OVERLAY_KEYS", ""));
+    std::string key;
+    while (extra >> key) add(key);
+
+    const char *home = std::getenv("HOME");
+    if (!home) return keys;
+    const std::filesystem::path base(home);
+    for (const auto &path : {
+             base / ".config/openvr/config/steamvr.vrsettings",
+             base / ".local/share/Steam/logs/console_log.txt"
+         }) {
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream) continue;
+        stream.seekg(0, std::ios::end);
+        const std::streamoff size = stream.tellg();
+        if (size <= 0) continue;
+        const auto count = static_cast<size_t>(std::min<std::streamoff>(size, 262144));
+        std::string content(count, '\0');
+        stream.seekg(size - static_cast<std::streamoff>(count), std::ios::beg);
+        if (!stream.read(content.data(), static_cast<std::streamsize>(count))) continue;
+
+        const std::string lastKey = "lastAccessedExternalOverlayKey";
+        if (const auto i = content.find(lastKey); i != std::string::npos) {
+            const auto colon = content.find(':', i + lastKey.size());
+            if (colon != std::string::npos) {
+                const auto q1 = content.find('"', colon + 1);
+                const auto q2 = q1 == std::string::npos ? q1 : content.find('"', q1 + 1);
+                if (q1 != std::string::npos && q2 != std::string::npos) add(content.substr(q1 + 1, q2 - q1 - 1));
+            }
+        }
+        const std::string prefix = "valve.steam.desktopgame.";
+        size_t i = 0;
+        while ((i = content.find(prefix, i)) != std::string::npos) {
+            const size_t begin = i;
+            i += prefix.size();
+            const size_t digits = i;
+            while (i < content.size() && content[i] >= '0' && content[i] <= '9') ++i;
+            if (i > digits) add(content.substr(begin, i - begin));
+        }
+    }
+    return keys;
+}
+
 int main() {
     vr::EVRInitError error = vr::VRInitError_None;
     vr::VR_Init(&error, vr::VRApplication_Overlay);
@@ -106,6 +170,8 @@ int main() {
     bool touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
     int smoothness = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
     int64_t nextSettings = 0;
+    int64_t nextOverlayScan = 0;
+    std::vector<std::string> overlayKeys;
     bool touchPressed = false;
     int64_t touchReleaseAt = 0;
     int owner = -1;
@@ -114,6 +180,18 @@ int main() {
     int64_t pressAt = 0, pending[2]{};
     while (vr::VRSystem()->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd)) {
         const int64_t now = NowNs();
+        if (touchOn && now >= nextOverlayScan) {
+            overlayKeys = TouchOverlayKeys();
+            // Query SteamVR live as well as its last saved settings file.
+            char activeKey[256] = {};
+            vr::EVRSettingsError settingsError = vr::VRSettingsError_None;
+            vr::VRSettings()->GetString("dashboard", "lastAccessedExternalOverlayKey",
+                                        activeKey, sizeof(activeKey), &settingsError);
+            if (settingsError == vr::VRSettingsError_None && activeKey[0] &&
+                std::find(overlayKeys.begin(), overlayKeys.end(), activeKey) == overlayKeys.end())
+                overlayKeys.emplace_back(activeKey);
+            nextOverlayScan = now + 3'000'000'000ll;
+        }
         if (now >= nextSettings) {
             nextSettings = now + 750'000'000ll;
             smoothPointer = handcut::Setting("HANDS_POINTER_SMOOTH", "1") != "0";
@@ -169,40 +247,41 @@ int main() {
                 // Optional fingertip contact with a known SteamVR overlay.
                 // Contact is tested against real 3D overlay geometry, not a guessed
                 // fixed screen plane; SteamVR dispatches the virtual controller click.
-                V tip = Point(h.p[8]);
-                V distal = Point(h.p[7]);
-                V finger = tip - distal;
-                const double fingerLen = Length(finger);
-                if (fingerLen > 0.009) finger = finger * (1.0 / fingerLen);
+                const V tip = Point(h.p[8]);
+                const V fromHeadToTip = tip - Position(poses[0].mDeviceToAbsoluteTracking);
+                const double tipRange = Length(fromHeadToTip);
+                // Project from the headset through the fingertip. A finger can be
+                // curled or angled relative to the window; its distal-bone axis
+                // is not a reliable screen normal. This ray still locates the
+                // visible spot directly under the tracked fingertip.
+                const V towardTip = tipRange > 0.12 ? fromHeadToTip * (1.0 / tipRange) : dir;
                 bool touching = false;
-                if (touchOn && fingerLen > 0.009 && !g.down) {
-                    // OpenVR cannot enumerate arbitrary third-party overlays.
-                    // Probe known dashboard/desktop keys; unknown apps need an adapter.
-                    const char *targets[] = {"framehands.dashboard", "system.desktop.1",
-                                             "system.desktop.2", "valve.steam.desktop", "system.settings"};
+                if (touchOn && tipRange > 0.12 && !g.down) {
                     vr::VROverlayIntersectionParams_t query{};
                     query.eOrigin = vr::TrackingUniverseRawAndUncalibrated;
-                    query.vSource = {{float(distal.x), float(distal.y), float(distal.z)}};
-                    query.vDirection = {{float(finger.x), float(finger.y), float(finger.z)}};
-                    for (const char *key : targets) {
+                    const V head = Position(poses[0].mDeviceToAbsoluteTracking);
+                    query.vSource = {{float(head.x), float(head.y), float(head.z)}};
+                    query.vDirection = {{float(towardTip.x), float(towardTip.y), float(towardTip.z)}};
+                    for (const std::string &key : overlayKeys) {
                         vr::VROverlayHandle_t target = vr::k_ulOverlayHandleInvalid;
-                        if (vr::VROverlay()->FindOverlay(key, &target) != vr::VROverlayError_None ||
+                        if (vr::VROverlay()->FindOverlay(key.c_str(), &target) != vr::VROverlayError_None ||
                             !vr::VROverlay()->IsOverlayVisible(target)) continue;
                         vr::VROverlayIntersectionResults_t hit{};
                         if (vr::VROverlay()->ComputeOverlayIntersection(target, &query, &hit)) {
-                            const double gap = double(hit.fDistance) - fingerLen;
-                            if (gap >= -0.012 && gap <= (touchPressed ? 0.055 : 0.022)) {
+                            const double gap = double(hit.fDistance) - tipRange;
+                            if (gap >= -0.018 && gap <= (touchPressed ? 0.055 : 0.022)) {
                                 touching = true;
                                 break;
                             }
                         }
                     }
                 }
-                // Switch to the fingertip pose for actual contact. The palm ray
-                // remains the default for distant pinching.
-                const bool touchAim = touchOn && (touching || touchPressed) && fingerLen > 0.009;
-                const V aimOrigin = touchAim ? tip - finger * 0.055 : origin;
-                const V aimDir = touchAim ? finger : dir;
+                // Aim *through* the fingertip when touching, instead of using
+                // the finger-bone direction: that is compatible with SteamVR's
+                // existing laser/controller intersection and the same pixel.
+                const bool touchAim = touchOn && (touching || touchPressed) && tipRange > 0.12;
+                const V aimOrigin = touchAim ? tip - towardTip * 0.075 : origin;
+                const V aimDir = touchAim ? towardTip : dir;
                 if (touchAim) aim.Reset(); // contact must follow the fingertip exactly
                 else if (smoothPointer) aim.Step(aimOrigin, aimDir, now, smoothness);
                 const V p = smoothPointer && !touchAim ? aim.origin : aimOrigin;
