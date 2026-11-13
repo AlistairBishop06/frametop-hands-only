@@ -36,6 +36,13 @@ if [[ -x $reg && -f $app/pointer/driver/fh_pointer/driver.vrdrivermanifest ]]; t
   env XDG_CONFIG_HOME="$HOME/.config" LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 \
     "$reg" removedriver "$app/pointer/driver/fh_pointer" || true
 fi
+# Frame Launcher: remove our XDG application shortcut
+launcher_file="$HOME/.local/share/applications/framehands-dashboard.desktop"
+if [[ -f "$launcher_file" ]] &&
+   grep -Fxq "Exec=$app/dashboard/launch.sh" "$launcher_file"; then
+  rm -f -- "$launcher_file"
+fi
+
 link=$HOME/.local/bin/framehands
 if [[ -L $link && $(readlink "$link") == "$app/framehands" ]]; then rm -f "$link"; fi
 bin=$app/hands/build/fh-camd

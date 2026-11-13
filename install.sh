@@ -183,4 +183,21 @@ if [[ -d $old ]]; then
   fi
   rm -rf "$old"
 fi
+# Frame Launcher: SteamOS Launch Application (+) desktop entry
+# The + menu scans XDG .desktop entries, not SteamVR .vrmanifest files.
+launcher_dir="$HOME/.local/share/applications"
+mkdir -p "$launcher_dir"
+cat > "$launcher_dir/framehands-dashboard.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=FrameHands
+Comment=Enable or disable hand tracking
+Exec=$app/dashboard/launch.sh
+Icon=preferences-system
+Terminal=false
+Categories=Utility;
+EOF
+chmod 644 "$launcher_dir/framehands-dashboard.desktop"
+
 echo 'FrameHands installed. Restart SteamVR normally to load its input driver, then run: ~/.local/bin/framehands status'
