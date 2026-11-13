@@ -269,11 +269,8 @@ int main() {
                     query.vSource = {{float(head.x), float(head.y), float(head.z)}};
                     query.vDirection = {{float(towardTip.x), float(towardTip.y), float(towardTip.z)}};
 
-                    // The currently focused panel is more reliable than trying
-                    // to guess every gamescope overlay's unique Steam app id.
-                    // Also check discovered keys for panels that have not yet
-                    // been selected with a controller/laser.
-                    const vr::VROverlayHandle_t focus = vr::VROverlay()->GetGamepadFocusOverlay();
+                    // This OpenVR SDK has no GetGamepadFocusOverlay() on IVROverlay.
+                    // Probe keys discovered from SteamVR's current settings and logs.
                     auto probe = [&](vr::VROverlayHandle_t target, const std::string &key) {
                         if (target == vr::k_ulOverlayHandleInvalid) return;
                         ++found;
@@ -294,15 +291,9 @@ int main() {
                         if (gap >= -0.040 && gap <= (touchPressed ? 0.090 : 0.050))
                             touching = true;
                     };
-                    if (focus != vr::k_ulOverlayHandleInvalid) {
-                        char focusKey[256] = {};
-                        vr::VROverlay()->GetOverlayKey(focus, focusKey, sizeof(focusKey));
-                        probe(focus, focusKey[0] ? focusKey : "[focused overlay]");
-                    }
                     for (const std::string &key : overlayKeys) {
                         vr::VROverlayHandle_t target = vr::k_ulOverlayHandleInvalid;
-                        if (vr::VROverlay()->FindOverlay(key.c_str(), &target) != vr::VROverlayError_None ||
-                            target == focus) continue;
+                        if (vr::VROverlay()->FindOverlay(key.c_str(), &target) != vr::VROverlayError_None) continue;
                         probe(target, key);
                     }
                     if (touchDebug && now >= nextTouchReport) {
