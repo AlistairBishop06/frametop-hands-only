@@ -1,4 +1,4 @@
-// Dashboard-only hand ray and pinch input. The SteamVR driver remains disconnected
+// Dashboard and undocked-panel pointer. The SteamVR driver remains disconnected
 // until a bare hand is pointing at the dashboard; no game input is synthesized.
 #include "../../config/ftsock.h"
 #include "../../renderer/handcut.h"
@@ -31,19 +31,22 @@ struct AimSmoother {
     double originSpeed = 0, directionSpeed = 0;
     int64_t last = 0;
     static double Alpha(double hz, double dt) { return 1.0 - std::exp(-2.0 * M_PI * hz * dt); }
-    static V Smooth(V raw, V filtered, double &speed, double dt, double gain) {
+    static V Smooth(V raw, V filtered, double &speed, double dt, double gain, double base) {
         const V delta = raw - filtered;
         speed += (Length(delta) / dt - speed) * Alpha(1.5, dt);
-        return filtered + delta * Alpha(std::clamp(2.5 + gain * speed, 2.5, 40.0), dt);
+        return filtered + delta * Alpha(std::clamp(base + gain * speed, base, 40.0), dt);
     }
     void Reset() { last = 0; originSpeed = directionSpeed = 0; }
-    void Step(V p, V d, int64_t now) {
+    void Step(V p, V d, int64_t now, int smoothness) {
         if (!last || now <= last || now - last > 250'000'000ll) {
             origin = p; direction = d; originSpeed = directionSpeed = 0;
         } else {
             const double dt = std::clamp((now - last) / 1e9, 0.002, 0.10);
-            origin = Smooth(p, origin, originSpeed, dt, 25.0);
-            direction = Smooth(d, direction, directionSpeed, dt, 12.0);
+            // At 50 the original 2.5 Hz steady-hand cut-off is preserved.
+            // Movement still raises the cutoff so deliberate aiming responds.
+            const double base = 12.0 * std::exp(-3.14 * std::clamp(smoothness, 0, 100) / 100.0);
+            origin = Smooth(p, origin, originSpeed, dt, 25.0, base);
+            direction = Smooth(d, direction, directionSpeed, dt, 12.0, base);
             const double n = Length(direction);
             direction = n > 1e-6 ? direction * (1.0 / n) : d;
         }
@@ -98,13 +101,26 @@ int main() {
     handcut::Hands hands;
     Controller controllers[vr::k_unMaxTrackedDeviceCount]{};
     AimSmoother aim;
-    const bool smoothPointer = handcut::Setting("HANDS_POINTER_SMOOTH", "1") != "0";
+    bool smoothPointer = handcut::Setting("HANDS_POINTER_SMOOTH", "1") != "0";
+    bool floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
+    bool touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
+    int smoothness = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
+    int64_t nextSettings = 0;
+    bool touchPressed = false;
+    int64_t touchReleaseAt = 0;
     int owner = -1;
     bool showing = false, pressed = false, initialized[2]{};
     uint32_t begins[2]{};
     int64_t pressAt = 0, pending[2]{};
     while (vr::VRSystem()->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd)) {
         const int64_t now = NowNs();
+        if (now >= nextSettings) {
+            nextSettings = now + 750'000'000ll;
+            smoothPointer = handcut::Setting("HANDS_POINTER_SMOOTH", "1") != "0";
+            floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
+            touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
+            smoothness = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
+        }
         vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
         vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0,
                                                         poses, vr::k_unMaxTrackedDeviceCount);
@@ -116,7 +132,7 @@ int main() {
         for (int s = 0; s < 2; ++s) {
             const auto &g = hands.pinch(s);
             if (!initialized[s]) begins[s] = g.begins, initialized[s] = true;
-            if (dashboard && side[s] && side[s]->stereo && !hands.grip(s).down) {
+            if ((dashboard || floatPointer) && side[s] && side[s]->stereo && !hands.grip(s).down) {
                 const auto &headPose = poses[0].mDeviceToAbsoluteTracking;
                 const V knuckle = (Point(side[s]->p[5])+Point(side[s]->p[9]))*0.5;
                 const V fromHead = knuckle-Position(headPose);
@@ -135,7 +151,7 @@ int main() {
         }
         if (pick != owner || pick < 0) {
             aim.Reset();  // never interpolate a ray between different hands
-            if (pressed) Send(fd, "btn trigger 0"), pressed = false;
+            if (pressed) Send(fd, "btn trigger 0"), pressed = touchPressed = false;
             if (showing) Send(fd, "hide"), showing = false;
             owner = pick;
         }
@@ -150,9 +166,47 @@ int main() {
             if (distance > 0.15) {
                 dir = dir * (1.0/distance);
                 const V origin = knuckle + dir*0.03;
-                if (smoothPointer) aim.Step(origin, dir, now);
-                const V p = smoothPointer ? aim.origin : origin;
-                const V d = smoothPointer ? aim.direction : dir;
+                // Optional fingertip contact with a known SteamVR overlay.
+                // Contact is tested against real 3D overlay geometry, not a guessed
+                // fixed screen plane; SteamVR dispatches the virtual controller click.
+                V tip = Point(h.p[8]);
+                V distal = Point(h.p[7]);
+                V finger = tip - distal;
+                const double fingerLen = Length(finger);
+                if (fingerLen > 0.009) finger = finger * (1.0 / fingerLen);
+                bool touching = false;
+                if (touchOn && fingerLen > 0.009 && !g.down) {
+                    // OpenVR cannot enumerate arbitrary third-party overlays.
+                    // Probe known dashboard/desktop keys; unknown apps need an adapter.
+                    const char *targets[] = {"framehands.dashboard", "system.desktop.1",
+                                             "system.desktop.2", "valve.steam.desktop", "system.settings"};
+                    vr::VROverlayIntersectionParams_t query{};
+                    query.eOrigin = vr::TrackingUniverseRawAndUncalibrated;
+                    query.vSource = {{float(distal.x), float(distal.y), float(distal.z)}};
+                    query.vDirection = {{float(finger.x), float(finger.y), float(finger.z)}};
+                    for (const char *key : targets) {
+                        vr::VROverlayHandle_t target = vr::k_ulOverlayHandleInvalid;
+                        if (vr::VROverlay()->FindOverlay(key, &target) != vr::VROverlayError_None ||
+                            !vr::VROverlay()->IsOverlayVisible(target)) continue;
+                        vr::VROverlayIntersectionResults_t hit{};
+                        if (vr::VROverlay()->ComputeOverlayIntersection(target, &query, &hit)) {
+                            const double gap = double(hit.fDistance) - fingerLen;
+                            if (gap >= -0.012 && gap <= (touchPressed ? 0.055 : 0.022)) {
+                                touching = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Switch to the fingertip pose for actual contact. The palm ray
+                // remains the default for distant pinching.
+                const bool touchAim = touchOn && (touching || touchPressed) && fingerLen > 0.009;
+                const V aimOrigin = touchAim ? tip - finger * 0.055 : origin;
+                const V aimDir = touchAim ? finger : dir;
+                if (touchAim) aim.Reset(); // contact must follow the fingertip exactly
+                else if (smoothPointer) aim.Step(aimOrigin, aimDir, now, smoothness);
+                const V p = smoothPointer && !touchAim ? aim.origin : aimOrigin;
+                const V d = smoothPointer && !touchAim ? aim.direction : aimDir;
                 char pose[160];
                 std::snprintf(pose, sizeof pose, "pose %.5f %.5f %.5f %.3f %.3f", p.x, p.y, p.z,
                               std::atan2(-d.x,-d.z)*180/M_PI, std::asin(std::clamp(d.y,-1.0,1.0))*180/M_PI);
@@ -162,10 +216,21 @@ int main() {
                     showing = Send(fd, "show");
                     if (showing) Send(fd, "btn a 1"), Send(fd, "btn a 0"); // claim the dashboard laser
                 }
+                if (showing && !pressed && touchOn && touching && now >= touchReleaseAt) {
+                    Send(fd, "btn trigger 1"); pressed = touchPressed = true; pressAt = now;
+                }
+                if (touchPressed) {
+                    if (!touching && now - pressAt > 70'000'000ll) {
+                        Send(fd, "btn trigger 0");
+                        pressed = touchPressed = false;
+                        touchReleaseAt = now + 130'000'000ll;
+                        aim.Reset();
+                    }
+                }
                 if (showing && !pressed && pending[owner] && now-pending[owner] < 200'000'000ll) {
                     Send(fd, "btn trigger 1"); pressed = true; pressAt = now; pending[owner] = 0;
                 }
-                if (pressed && (!g.down || now-g.beginNs > 4'000'000'000ll) && now-pressAt > 50'000'000ll)
+                if (pressed && !touchPressed && (!g.down || now-g.beginNs > 4'000'000'000ll) && now-pressAt > 50'000'000ll)
                     Send(fd, "btn trigger 0"), pressed = false;
             }
         }

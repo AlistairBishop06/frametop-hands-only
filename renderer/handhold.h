@@ -25,6 +25,7 @@ namespace handhold {
 struct Params {
     double holdS = 3.0;           // a lost hand stays, frozen, this long
     double blendMinMs = 15, blendMaxMs = 70;
+    double blendFactor = 1.0; // extra damping without changing raw tracking
     // the palm's farthest plausible move: jumpM, or jumpSpeed m/s (the lazy susan's strokes peak at 4.5)
     double jumpM = 0.15, jumpSpeed = 6.0;
     double flipDeg = 100;         // the palm turning more than this within 0.2 s is a misreading too
@@ -124,7 +125,7 @@ private:
     }
     void Accept(const handcut::Hand &h, int64_t nowNs, bool snap, const Params &k) {
         from_ = snap ? h : shown_;
-        blendMs_ = snap ? 0 : std::clamp((nowNs - acceptNs_) / 1e6, k.blendMinMs, k.blendMaxMs);
+        blendMs_ = snap ? 0 : std::clamp((nowNs - acceptNs_) / 1e6 * k.blendFactor, k.blendMinMs, k.blendMaxMs);
         blendNs_ = acceptNs_ = nowNs;
         last_ = h;
         if (snap) shown_ = h;

@@ -27,6 +27,8 @@ jobs:
         env:
           OPENVR_LIB: ${{ github.workspace }}/build/openvr
         run: bash scripts/build.sh
+      - name: Validate FrameHands service and dashboard commands
+        run: python3 -m unittest discover -s tests -v
       - name: Check binary architecture and external libraries
         run: |
           file hands/build/fh-camd hands/build/fh-hands renderer/build/framehands-view dashboard/build/framehands-dashboard pointer/build/fh-input pointer/build/driver_fh_pointer.so

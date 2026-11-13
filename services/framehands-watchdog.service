@@ -1,0 +1,14 @@
+[Unit]
+Description=FrameHands frame-rate recovery monitor
+After=steamvr.service framehands-track.service
+Requisite=steamvr.service
+PartOf=steamvr.service
+
+[Service]
+ExecStart=@ROOT@/framehands run-watchdog
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=5
+
+[Install]
+WantedBy=steamvr.service

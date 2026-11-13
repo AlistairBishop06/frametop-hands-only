@@ -1178,6 +1178,7 @@ int main(int argc, char **argv) {
     const bool smooth = handcut::Setting("HANDS_VIEW_SMOOTH", "1") != "0";
     handhold::Params holdK;
     holdK.holdS = std::clamp(std::atof(handcut::Setting("HANDS_VIEW_HOLD", "3").c_str()), 0.0, 30.0);
+    int64_t nextSmoothSettings = 0;
     handmesh::Mesh mesh;
     handskin::Bones bones;
     handrobot::Bones robot;
@@ -1208,6 +1209,13 @@ int main(int argc, char **argv) {
     while (!g_stop && (seconds <= 0 || (MonoNs() - start) / 1e9 < seconds)) {
         const auto tick = std::chrono::steady_clock::now();
         const int64_t now = MonoNs();
+        if (now >= nextSmoothSettings) {
+            nextSmoothSettings = now + 750'000'000ll;
+            const int level = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
+            holdK.blendMinMs = 5.0 + 0.22 * level;
+            holdK.blendMaxMs = 35.0 + 1.3 * level;
+            holdK.blendFactor = 0.3 + 0.023 * level;
+        }
         vr::VREvent_t ev;
         while (vr::VRSystem()->PollNextEvent(&ev, sizeof ev)) {
             if (ev.eventType == vr::VREvent_Quit) {

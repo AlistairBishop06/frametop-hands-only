@@ -979,9 +979,45 @@ int main(int argc, char **argv) {
                 met = met && ring.meta(index[name], latest[name], &meta);
                 if (met) t0 = std::min(t0, meta.capture_ns), t1 = std::max(t1, meta.capture_ns), lead_dq = std::max(lead_dq, meta.dqbuf_ns);
             }
-            if (!met || t1 - t0 > 3'000'000) {   // one is a frame ahead: wait for the other
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
+            if (!met || t1 - t0 > 3'000'000) {
+                // Side-camera reads can straddle a camera tick. Search the last four
+                // unconsumed frames for a truly synchronous pair before dropping
+                // the whole set. Never combine frames taken 30 ms apart.
+                bool matched = false;
+                if (lead.size() == 2) {
+                    const auto &a = lead[0], &b = lead[1];
+                    uint64_t bestA = 0, bestB = 0, bestGap = 3'000'001;
+                    fh_ring_slot_t bestAM{}, bestBM{};
+                    for (int j = 0; j < 4; ++j) {
+                        const uint64_t na = ring.latest(index[a]);
+                        if (na <= uint64_t(j) || na - j <= last[a]) break;
+                        fh_ring_slot_t ma{};
+                        if (!ring.meta(index[a], na - j, &ma)) continue;
+                        for (int k = 0; k < 4; ++k) {
+                            const uint64_t nb = ring.latest(index[b]);
+                            if (nb <= uint64_t(k) || nb - k <= last[b]) break;
+                            fh_ring_slot_t mb{};
+                            if (!ring.meta(index[b], nb - k, &mb)) continue;
+                            const uint64_t gap = ma.capture_ns > mb.capture_ns
+                                ? ma.capture_ns - mb.capture_ns : mb.capture_ns - ma.capture_ns;
+                            if (gap <= 3'000'000 && (gap < bestGap ||
+                                (gap == bestGap && na - j + nb - k > bestA + bestB))) {
+                                bestGap = gap; bestA = na - j; bestB = nb - k;
+                                bestAM = ma; bestBM = mb; matched = true;
+                            }
+                        }
+                    }
+                    if (matched) {
+                        latest[a] = bestA; latest[b] = bestB;
+                        t0 = std::min(bestAM.capture_ns, bestBM.capture_ns);
+                        t1 = std::max(bestAM.capture_ns, bestBM.capture_ns);
+                        lead_dq = std::max(bestAM.dqbuf_ns, bestBM.dqbuf_ns);
+                    }
+                }
+                if (!matched) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
             }
             // the uppers' frames from the same moment: in step, theirs may be a few ms behind
             std::map<std::string, uint64_t> with;

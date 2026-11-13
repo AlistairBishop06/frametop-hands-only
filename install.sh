@@ -24,7 +24,7 @@ reg=/opt/steamvr/bin/linuxarm64/vrpathreg
 [[ -x $reg ]] || fail 'SteamVR driver registration tool is missing'
 if [[ $(id -u) != 0 ]]; then command -v sudo >/dev/null || fail 'sudo is required to set camera capabilities'; fi
 [[ ! -L $app ]] || fail 'FrameHands app path is a symlink; refusing to replace it'
-for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service; do
+for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service framehands-watchdog.service; do
   file=$units/$unit
   if [[ -f $file ]] && ! grep -Fq "$app/" "$file"; then
     fail "$file exists and does not belong to this FrameHands install"
@@ -115,7 +115,7 @@ fi
 getcap "$stage/hands/build/fh-camd" | grep -q cap_sys_ptrace || fail 'camera capabilities were not applied'
 
 # From here, only FrameHands units are changed. A failed upgrade restores the old app.
-systemctl --user stop framehands-dashboard.service framehands-input.service framehands-view.service framehands-track.service framehands-camd.service 2>/dev/null || true
+systemctl --user stop framehands-watchdog.service framehands-dashboard.service framehands-input.service framehands-view.service framehands-track.service framehands-camd.service 2>/dev/null || true
 old=$HOME/.local/share/framehands/app.old.$$
 if [[ -e $app ]]; then mv "$app" "$old"; fi
 mkdir -p "$stage/dashboard"
@@ -139,7 +139,7 @@ manifest = {'source': 'builtin', 'applications': [{
 (Path(os.environ['FRAMEHANDS_STAGE']) / 'dashboard/framehands.vrmanifest').write_text(json.dumps(manifest, indent=2) + '\n')
 PYMANIFEST
 mv "$stage" "$app"
-for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service; do
+for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service framehands-watchdog.service; do
   sed "s|@ROOT@|$app|g" "$app/services/$unit" > "$units/$unit"
 done
 ln -sfn "$app/framehands" "$HOME/.local/bin/framehands"
@@ -153,11 +153,11 @@ register_driver() {
 }
 if ! register_driver || ! "$app/framehands" sync; then
   echo 'FrameHands install: service activation failed; restoring the previous install' >&2
-  systemctl --user stop framehands-dashboard.service framehands-input.service framehands-view.service framehands-track.service framehands-camd.service 2>/dev/null || true
+  systemctl --user stop framehands-watchdog.service framehands-dashboard.service framehands-input.service framehands-view.service framehands-track.service framehands-camd.service 2>/dev/null || true
   rm -rf -- "$app"
   if [[ -d $old ]]; then
     mv "$old" "$app"
-    for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service; do
+    for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service framehands-watchdog.service; do
       if [[ -f $app/services/$unit ]]; then
         sed "s|@ROOT@|$app|g" "$app/services/$unit" > "$units/$unit"
       else
@@ -170,7 +170,7 @@ if ! register_driver || ! "$app/framehands" sync; then
   else
     env XDG_CONFIG_HOME="$HOME/.config" LD_LIBRARY_PATH=/opt/steamvr/bin/linuxarm64 \
       "$reg" removedriver "$app/pointer/driver/fh_pointer" 2>/dev/null || true
-    for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service; do rm -f "$units/$unit"; done
+    for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service framehands-watchdog.service; do rm -f "$units/$unit"; done
     rm -f "$HOME/.local/bin/framehands"
     systemctl --user daemon-reload
   fi
@@ -193,6 +193,22 @@ Version=1.0
 Type=Application
 Name=FrameHands
 Comment=Enable or disable hand tracking
+Exec=$app/dashboard/launch.sh
+Icon=preferences-system
+Terminal=false
+Categories=Utility;
+EOF
+chmod 644 "$launcher_dir/framehands-dashboard.desktop"
+
+# FrameHands SteamOS application launcher
+launcher_dir="$HOME/.local/share/applications"
+mkdir -p "$launcher_dir"
+cat > "$launcher_dir/framehands-dashboard.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=FrameHands
+Comment=Hand tracking controls
 Exec=$app/dashboard/launch.sh
 Icon=preferences-system
 Terminal=false

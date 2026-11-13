@@ -372,3 +372,44 @@ The tracker publishes shared-memory data under `/run/user/$UID/framehands/`, inc
 ## Credits and licences
 
 FrameHands retains hand tracking, camera broker and rendering work from [Frametop](https://github.com/DeeJanuz/frametop), copyright © 2026 DeeJanuz, under the repository's MIT [`LICENSE`](LICENSE). The camera feed notice is in `hands/camd/LICENSE.FrameEyeCameraFeed`. Bundled stock models and fine-tuned model notices are provided in `hands/models/NOTICE`, with the fine-tuned model revision pinned by `hands/models.pin`. Rendered hand assets and their licences are under `renderer/assets/hands/`. The release also includes the pinned JsonCpp source licence.
+
+## Floating panels, direct touch, smoothness, and recovery
+
+The hand pointer now remains available while the SteamVR dashboard is hidden
+(`HANDS_FLOATING_POINTER=1`), permitting SteamVR to route its synthetic
+controller ray to compatible **Float in World** panels. On SteamVR builds
+that expose it, turn on **Settings > Dashboard > Allow Undocked Dashboard
+Overlay Interaction** as well. This relies on the
+panel's existing SteamVR laser-mouse support and has not been verified on every
+floating overlay implementation. Disable it with `HANDS_FLOATING_POINTER=0`
+if you do not want a virtual pointer outside the dashboard.
+
+The FrameHands panel now includes **Direct Touch** (default off) and a
+**Smoothness** slider (0–100, default 50). Both settings persist in
+`~/.config/framehands/config` and update live without restarting camera
+tracking. Smoothness affects the rendered hand interpolation and laser aim;
+it cannot recover missing camera data. For direct touch, FrameHands currently
+checks its **own** visible dashboard overlay using OpenVR's
+`ComputeOverlayIntersection`. When a fingertip approaches the overlay, it
+switches the pointer to a fingertip ray and sends a click with contact/release
+hysteresis. The helper probes known Valve dashboard and desktop overlay keys (including
+`system.desktop.1`) and uses the compositor's 3D intersection; arbitrary
+third-party panels still require overlay discovery or integration, so touch
+is **not** claimed to work everywhere yet. Pinch-at-distance
+is unchanged.
+
+`AUTO_RECOVER=1` (default) runs a lightweight watchdog under SteamVR. The
+tracker normally publishes at least 5 sets/s, even when no hands are present.
+The tracker also scans up to four recent camera frames when its side cameras
+are momentarily out of sync, rather than discarding every set. If its
+published rate nevertheless falls below 2 sets/s for approximately six
+seconds while the camera broker and tracking services are active, the watchdog
+restarts only the four FrameHands tracking/input services. Recovery attempts are at least 90 seconds
+apart. It does not restart SteamVR or XRService. Disable with
+`AUTO_RECOVER=0` followed by `framehands sync`. This is a recovery mechanism,
+not a confirmed root-cause fix for all 1-fps stalls; check
+`framehands logs` to diagnose camera desynchronisation and inference overload.
+
+The + application menu shortcut should remain installed via
+`~/.local/share/applications/framehands-dashboard.desktop`. This update does
+not alter desktop-launcher registration.

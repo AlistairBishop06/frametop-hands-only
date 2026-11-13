@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 namespace {
-constexpr int W = 640, H = 360;
+constexpr int W = 640, H = 480;
 struct RGB { uint8_t r, g, b; };
 std::vector<uint8_t> pixels(W * H * 4);
 
@@ -111,7 +111,27 @@ bool Enabled() {
     }
     return track && autostart;
 }
-void Paint(bool enabled, bool busy, bool failed) {
+bool TouchEnabled() {
+    const char *home = std::getenv("HOME");
+    if (!home) return false;
+    std::ifstream f(std::filesystem::path(home) / ".config/framehands/config");
+    std::string line; bool enabled = false;
+    while (std::getline(f, line))
+        if (line == "HANDS_TOUCH=1") enabled = true;
+        else if (line == "HANDS_TOUCH=0") enabled = false;
+    return enabled;
+}
+int Smoothness() {
+    const char *home = std::getenv("HOME");
+    if (!home) return 50;
+    std::ifstream f(std::filesystem::path(home) / ".config/framehands/config");
+    std::string line; int level = 50;
+    while (std::getline(f, line)) if (line.rfind("HANDS_SMOOTHNESS=", 0) == 0) {
+        try { level = std::stoi(line.substr(17)); } catch (...) {}
+    }
+    return std::clamp(level, 0, 100);
+}
+void Paint(bool enabled, bool touch, int smoothness, bool busy, bool failed) {
     Rect(0, 0, W, H, {13, 22, 38});
     Rect(0, 0, W, 10, {73, 175, 235});
     // The X is separate from the toggle: closing never disables tracking.
@@ -127,7 +147,15 @@ void Paint(bool enabled, bool busy, bool failed) {
     if (busy) Text("UPDATING", 188, 5, {255, 255, 255});
     else Text(enabled ? "ON" : "OFF", 188, 6, {255, 255, 255});
     Text(failed ? "FAILED - CHECK LOGS" : enabled ? "CLICK TO TURN OFF" : "CLICK TO TURN ON",
-         293, 2, {204, 220, 233});
+         276, 2, {204, 220, 233});
+    Rect(76, 306, 564, 356, touch ? RGB{26, 133, 115} : RGB{69, 83, 107});
+    Text(touch ? "DIRECT TOUCH ON" : "DIRECT TOUCH OFF", 316, 3, {245, 250, 255});
+    Text("HAND SMOOTHNESS", 369, 2, {204, 220, 233});
+    Rect(100, 409, 540, 425, {52, 69, 90});
+    const int knob = 100 + 440 * std::clamp(smoothness, 0, 100) / 100;
+    Rect(100, 409, knob, 425, {73, 175, 235});
+    Rect(knob-6, 402, knob+6, 432, {237, 245, 255});
+    Text("SMOOTHNESS " + std::to_string(smoothness), 444, 2, {204, 220, 233});
 }
 
 int RegisterManifest(bool remove) {
@@ -181,10 +209,12 @@ int main(int argc, char **argv) {
     }
     vr::VROverlay()->SetOverlayRaw(thumb, thumbnail.data(), 64, 64, 4);
 
-    bool enabled = Enabled(), busy = false, failed = false;
+    bool enabled = Enabled(), touch = TouchEnabled(), busy = false, failed = false;
+    int smoothness = Smoothness();
+    bool sliding = false;
     pid_t child = -1;
     auto next = std::chrono::steady_clock::now();
-    Paint(enabled, busy, failed);
+    Paint(enabled, touch, smoothness, busy, failed);
     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
     // Opening FrameHands from + selects this panel immediately.
     vr::VROverlay()->ShowDashboard("framehands.dashboard");
@@ -203,15 +233,51 @@ int main(int argc, char **argv) {
                 running = false;
                 break;
             }
+            if (event.eventType == vr::VREvent_MouseMove && sliding) {
+                smoothness = std::clamp(int((event.data.mouse.x - 100.f) * 100.f / 440.f), 0, 100);
+                Paint(enabled, touch, smoothness, busy, failed);
+                vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+            }
+            if (event.eventType == vr::VREvent_MouseButtonUp && sliding) {
+                sliding = false;
+                child = fork();
+                if (child == 0) {
+                    const std::string cli = Cli().string();
+                    const std::string level = std::to_string(smoothness);
+                    execl(cli.c_str(), cli.c_str(), "smoothness", level.c_str(), (char *)nullptr);
+                    _exit(127);
+                }
+                busy = child > 0; failed = child < 0;
+            }
             if (event.eventType == vr::VREvent_MouseButtonDown && !busy) {
                 const float x = event.data.mouse.x;
-                const float y = event.data.mouse.y;
-                // Accept both OpenVR's mouse-coordinate orientations for the X.
-                if (x >= 566 && x <= 628 && (y <= 100 || y >= H - 100)) {
+                const float y = H - event.data.mouse.y; // GL mouse coordinates are bottom-left.
+                if (x >= 566 && x <= 628 && y >= 22 && y <= 94) {
                     running = false;
                     break;
                 }
-                // Otherwise preserve the original full-panel toggle behaviour.
+                // Slider changes are committed on mouse-up, not on every move.
+                if (x >= 82 && x <= 554 && y >= 390 && y <= 439) {
+                    sliding = true;
+                    smoothness = std::clamp(int((x - 100.f) * 100.f / 440.f), 0, 100);
+                    Paint(enabled, touch, smoothness, busy, failed);
+                    vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+                    continue;
+                }
+                if (x >= 76 && x <= 564 && y >= 306 && y <= 356) {
+                    const bool toEnable = !touch;
+                    child = fork();
+                    if (child == 0) {
+                        const std::string cli = Cli().string();
+                        execl(cli.c_str(), cli.c_str(), toEnable ? "touch-on" : "touch-off", (char *)nullptr);
+                        _exit(127);
+                    }
+                    busy = child > 0; failed = child < 0;
+                    Paint(enabled, touch, smoothness, busy, failed);
+                    vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+                    continue;
+                }
+                if (!(x >= 76 && x <= 564 && y >= 165 && y <= 277)) continue;
                 const bool toEnable = !enabled;
                 child = fork();
                 if (child == 0) {
@@ -221,7 +287,7 @@ int main(int argc, char **argv) {
                 }
                 busy = child > 0;
                 failed = child < 0;
-                Paint(enabled, busy, failed);
+                Paint(enabled, touch, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
         }
@@ -238,16 +304,19 @@ int main(int argc, char **argv) {
                 busy = false;
                 failed = done < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
                 enabled = Enabled();
-                Paint(enabled, busy, failed);
+                touch = TouchEnabled();
+                smoothness = Smoothness();
+                Paint(enabled, touch, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
         }
         if (std::chrono::steady_clock::now() >= next && !busy) {
             next = std::chrono::steady_clock::now() + std::chrono::milliseconds(800);
-            const bool current = Enabled();
-            if (current != enabled) {
-                enabled = current;
-                Paint(enabled, busy, failed);
+            const bool current = Enabled(), currentTouch = TouchEnabled();
+            const int currentSmooth = Smoothness();
+            if (!sliding && (current != enabled || currentTouch != touch || currentSmooth != smoothness)) {
+                enabled = current; touch = currentTouch; smoothness = currentSmooth;
+                Paint(enabled, touch, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
         }

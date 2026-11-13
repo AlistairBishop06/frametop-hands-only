@@ -15,6 +15,7 @@ CONFIG = Path.home() / ".config/framehands/config"
 RUN = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{getattr(os, 'getuid', lambda: 0)()}")) / "framehands"
 UNITS = ("framehands-camd.service", "framehands-track.service", "framehands-view.service", "framehands-input.service")
 DASHBOARD_UNIT = "framehands-dashboard.service"
+WATCHDOG_UNIT = "framehands-watchdog.service"
 
 
 def config():
@@ -77,8 +78,9 @@ def tracker_args():
 def sync_enabled():
     wanted = selected() if config().get("AUTO_START", "1") != "0" else ()
     # Dashboard remains available even when tracking/autostart is switched off.
-    for unit in (*UNITS, DASHBOARD_UNIT):
-        cmd = "enable" if (unit == DASHBOARD_UNIT or unit in wanted) else "disable"
+    for unit in (*UNITS, DASHBOARD_UNIT, WATCHDOG_UNIT):
+        use_watchdog = unit == WATCHDOG_UNIT and config().get("AUTO_RECOVER", "1") != "0"
+        cmd = "enable" if (unit == DASHBOARD_UNIT or (use_watchdog and bool(wanted)) or unit in wanted) else "disable"
         result = ctl(cmd, unit)
         if result.returncode:
             raise RuntimeError(result.stderr.strip() or f"systemctl {cmd} {unit} failed")
@@ -173,10 +175,53 @@ def doctor():
     return 1 if issues else 0
 
 
+def watchdog():
+    """Recover only our services after persistent low publish rates.
+
+    The tracker normally publishes at >=5 Hz with no hands; the sequence
+    number is monotonically incremented twice on every published set.
+    This runs separately because a blocked tracker cannot restart itself.
+    """
+    prev = None
+    bad = 0
+    last_recovery = 0.0
+    while True:
+        time.sleep(2)
+        cfg = config()
+        if (cfg.get("AUTO_RECOVER", "1") == "0" or cfg.get("AUTO_START", "1") == "0"
+                or not selected() or not active("steamvr.service")
+                or not active("framehands-track.service") or not active("framehands-camd.service")
+                or (RUN / "park").exists()):
+            prev, bad = None, 0
+            continue
+        data = shared(RUN / "hands", b"FHHANDS1", 64)
+        seq = struct.unpack_from("<Q", data, 16)[0] if data else None
+        if seq is None:
+            bad += 1
+        elif prev is not None:
+            rate = ((seq - prev) // 2) / 2 if seq >= prev else 0
+            bad = bad + 1 if rate < 2.0 else 0
+        prev = seq
+        if bad < 3 or time.monotonic() - last_recovery < 90:
+            continue
+        # Never touch SteamVR, XRService, files, or other applications.
+        print("framehands watchdog: under 2 published sets/s for >=6s; restarting FrameHands services", flush=True)
+        last_recovery = time.monotonic()
+        bad, prev = 0, None
+        stopped = ctl("stop", *reversed(UNITS))
+        if stopped.returncode:
+            print("framehands watchdog: stop failed:", stopped.stderr.strip(), flush=True)
+            continue
+        started = ctl("start", *selected())
+        if started.returncode:
+            print("framehands watchdog: start failed:", started.stderr.strip(), flush=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="framehands")
     parser.add_argument("command", choices=("start", "stop", "restart", "status", "enable", "disable",
-                                            "gestures", "logs", "doctor", "sync", "run-tracker", "run-camd", "run-view", "run-input", "run-dashboard", "register-dashboard"))
+                                            "gestures", "logs", "doctor", "sync", "run-tracker", "run-camd", "run-view", "run-input", "run-dashboard", "register-dashboard", "touch-on", "touch-off", "smoothness", "run-watchdog"))
+    parser.add_argument("value", nargs="?", help="smoothness 0..100")
     args = parser.parse_args(argv)
     cmd = args.command
     try:
@@ -196,6 +241,16 @@ def main(argv=None):
         elif cmd == "run-dashboard":
             binary = str(ROOT / "dashboard/build/framehands-dashboard")
             os.execv(binary, (binary,))
+        elif cmd == "run-watchdog":
+            return watchdog()
+        elif cmd in ("touch-on", "touch-off"):
+            set_config("HANDS_TOUCH", "1" if cmd == "touch-on" else "0")
+            print("Direct touch:", "on" if cmd == "touch-on" else "off")
+        elif cmd == "smoothness":
+            if args.value is None or not args.value.isdecimal() or int(args.value) > 100:
+                raise RuntimeError("usage: framehands smoothness 0..100")
+            set_config("HANDS_SMOOTHNESS", str(int(args.value)))
+            print("Smoothness:", args.value)
         elif cmd == "register-dashboard":
             binary = str(ROOT / "dashboard/build/framehands-dashboard")
             os.execv(binary, (binary, "--register"))
@@ -206,6 +261,7 @@ def main(argv=None):
             if active("steamvr.service"):
                 ctl("start", *selected(), check=True)
                 ctl("start", DASHBOARD_UNIT, check=True)
+                if config().get("AUTO_RECOVER", "1") != "0": ctl("start", WATCHDOG_UNIT, check=True)
             print("FrameHands will start with SteamVR.")
         elif cmd == "disable":
             set_config("AUTO_START", "0")
@@ -219,6 +275,10 @@ def main(argv=None):
                 ctl("stop", *reversed(unused), check=True)
             if active("steamvr.service"):
                 ctl("start", DASHBOARD_UNIT, check=True)
+                if config().get("AUTO_RECOVER", "1") != "0" and selected() and config().get("AUTO_START", "1") != "0":
+                    ctl("start", WATCHDOG_UNIT, check=True)
+                else:
+                    ctl("stop", WATCHDOG_UNIT)
                 if config().get("AUTO_START", "1") != "0" and selected():
                     ctl("start", *selected(), check=True)
         elif cmd in ("start", "restart"):
@@ -237,13 +297,13 @@ def main(argv=None):
             ctl("stop", *reversed(UNITS), check=True)
         elif cmd == "status":
             print("SteamVR:", "running" if active("steamvr.service") else "stopped")
-            for unit in (*UNITS, DASHBOARD_UNIT):
+            for unit in (*UNITS, DASHBOARD_UNIT, WATCHDOG_UNIT):
                 print(f"{unit}: {'running' if active(unit) else 'stopped'}, {'enabled' if enabled(unit) else 'disabled'}")
             print("Hands:", hands())
         elif cmd == "gestures":
             return gestures()
         elif cmd == "logs":
-            return subprocess.call(("journalctl", "--user", *sum((("-u", u) for u in (*UNITS, DASHBOARD_UNIT)), ()),
+            return subprocess.call(("journalctl", "--user", *sum((("-u", u) for u in (*UNITS, DASHBOARD_UNIT, WATCHDOG_UNIT)), ()),
                                     "--no-pager", "-n", "100"))
         elif cmd == "doctor":
             return doctor()
