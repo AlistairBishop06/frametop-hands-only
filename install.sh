@@ -6,8 +6,10 @@ app=$HOME/.local/share/framehands/app
 units=$HOME/.config/systemd/user
 tmp=$(mktemp -d)
 stage=
+unit_tmp=
 cleanup() {
   rm -rf -- "$tmp"
+  if [[ -n $unit_tmp ]]; then rm -f -- "$unit_tmp"; fi
   if [[ -n $stage && -d $stage ]]; then rm -rf -- "$stage"; fi
 }
 trap cleanup EXIT
@@ -26,7 +28,9 @@ if [[ $(id -u) != 0 ]]; then command -v sudo >/dev/null || fail 'sudo is require
 [[ ! -L $app ]] || fail 'FrameHands app path is a symlink; refusing to replace it'
 for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service framehands-watchdog.service framehands-game-monitor.service; do
   file=$units/$unit
-  if [[ -f $file ]] && ! grep -Fq "$app/" "$file"; then
+  # An older failed install could leave this new unit as a zero-byte file:
+  # the shell created the redirection target before sed found the missing file.
+  if [[ -f $file && ( $unit != framehands-game-monitor.service || -s $file ) ]] && ! grep -Fq "$app/" "$file"; then
     fail "$file exists and does not belong to this FrameHands install"
   fi
 done
@@ -37,7 +41,9 @@ for unit in frametop-camd.service frametop-hands.service frametop-handview.servi
 done
 
 source_dir=$root
+downloaded_release=0
 if [[ ! -x $root/hands/build/fh-camd || ! -x $root/hands/build/fh-hands || ! -x $root/renderer/build/framehands-view || ! -x $root/pointer/build/fh-input || ! -f $root/pointer/build/driver_fh_pointer.so || ! -x $root/dashboard/build/framehands-dashboard ]]; then
+  downloaded_release=1
   command -v git >/dev/null || fail 'prebuilt binaries are missing; install from a FrameHands release archive'
   remote=$(git -C "$root" remote get-url origin 2>/dev/null || true)
   case $remote in
@@ -73,6 +79,16 @@ done
 [[ -f $source_dir/hands/models/student/hand.ncnn.bin ]] ||
   fail 'the pinned fine-tuned models are missing from the release'
 [[ -f $source_dir/hands/models/ncnn/hand.ncnn.bin ]] || fail 'the stock fallback model is missing'
+for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service framehands-watchdog.service framehands-game-monitor.service; do
+  [[ -f $source_dir/services/$unit ]] ||
+    fail "the published release is older than this installer (missing $unit); publish a release built from this commit before retrying"
+done
+if (( downloaded_release )) && [[ -f $source_dir/.framehands-source-commit ]]; then
+  expected=$(git -C "$root" rev-parse HEAD 2>/dev/null || true)
+  actual=$(<"$source_dir/.framehands-source-commit")
+  [[ -z $expected || $actual == "$expected" ]] ||
+    fail "the published release was built from $actual, but this checkout is $expected; publish this commit before retrying"
+fi
 
 stage=$HOME/.local/share/framehands/app.new.$$
 [[ ! -e $stage && ! -L $stage ]] || fail 'temporary install path already exists'
@@ -140,7 +156,10 @@ manifest = {'source': 'builtin', 'applications': [{
 PYMANIFEST
 mv "$stage" "$app"
 for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service framehands-watchdog.service framehands-game-monitor.service; do
-  sed "s|@ROOT@|$app|g" "$app/services/$unit" > "$units/$unit"
+  unit_tmp=$(mktemp "$units/.framehands-unit.XXXXXX")
+  sed "s|@ROOT@|$app|g" "$app/services/$unit" > "$unit_tmp"
+  mv "$unit_tmp" "$units/$unit"
+  unit_tmp=
 done
 ln -sfn "$app/framehands" "$HOME/.local/bin/framehands"
 systemctl --user daemon-reload
@@ -159,7 +178,10 @@ if ! register_driver || ! "$app/framehands" sync; then
     mv "$old" "$app"
     for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service framehands-watchdog.service framehands-game-monitor.service; do
       if [[ -f $app/services/$unit ]]; then
-        sed "s|@ROOT@|$app|g" "$app/services/$unit" > "$units/$unit"
+        unit_tmp=$(mktemp "$units/.framehands-unit.XXXXXX")
+        sed "s|@ROOT@|$app|g" "$app/services/$unit" > "$unit_tmp"
+        mv "$unit_tmp" "$units/$unit"
+        unit_tmp=
       else
         rm -f "$units/$unit"
       fi

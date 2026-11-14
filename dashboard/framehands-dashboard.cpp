@@ -2,6 +2,7 @@
 // A separate oneshot systemd unit registers the app; this UI is never auto-started.
 // Closing the UI destroys the overlay but does NOT change hand-tracking settings.
 #include <openvr.h>
+#include "game_scene.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -254,7 +255,7 @@ void Paint(bool enabled, bool visuals, bool touch, bool gamePause, int smoothnes
     RoundRect({28, 364, 612, 453}, 18, {5, 11, 22});
     RoundRect(kGamePause, 18, {23, 37, 55});
     TextAt(50, 376, "PAUSE FOR GAMES", 2, ink);
-    TextAt(50, 410, "LOCAL OR STREAMED VR", 2, muted);
+    TextAt(50, 410, "ACTIVE STEAM VR SCENE", 2, muted);
     TextAt(50, 431, gamePause ? (paused ? "TRACKING PAUSED" : "AUTOMATIC") : "DISABLED", 2,
            paused ? RGB{236, 188, 116} : muted);
     Toggle(514, 385, gamePause);
@@ -292,8 +293,19 @@ int GameMonitor() {
     if (error != vr::VRInitError_None) return 1;
     bool paused = GamePaused();
     int gameTicks = 0, idleTicks = 0;
+    std::string lastKey = "<initial>";
     while (true) {
-        const bool game = vr::VRApplications()->GetCurrentSceneProcessId() != 0;
+        const uint32_t scenePid = vr::VRApplications()->GetCurrentSceneProcessId();
+        char appKey[256] = {};
+        const bool identified = scenePid &&
+            vr::VRApplications()->GetApplicationKeyByProcessId(scenePid, appKey, sizeof appKey) == vr::VRApplicationError_None;
+        const std::string key = identified ? appKey : "";
+        if (key != lastKey) {
+            std::cerr << "framehands game monitor: scene pid=" << scenePid
+                      << " key=" << (key.empty() ? "unidentified" : key) << '\n';
+            lastKey = key;
+        }
+        const bool game = IsGameScene(key);
         gameTicks = game ? std::min(gameTicks + 1, 4) : 0;
         idleTicks = game ? 0 : std::min(idleTicks + 1, 4);
         if ((gameTicks >= 2 && !paused) || (idleTicks >= 4 && paused)) {

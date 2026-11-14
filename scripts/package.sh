@@ -22,10 +22,11 @@ cp "$root/pointer/build/driver_fh_pointer.so" "$tmp/pointer/driver/fh_pointer/bi
 cp "$root/config/default.conf" "$tmp/config/"
 cp "$root/services/"*.service "$tmp/services/"
 cp "$root/framehands" "$root/install.sh" "$root/uninstall.sh" "$root/README.md" "$root/LICENSE" "$tmp/"
+git -C "$root" rev-parse HEAD > "$tmp/.framehands-source-commit"
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
     -C "$tmp" -czf "$out/framehands-aarch64.tar.gz" .
 tar -tzf "$out/framehands-aarch64.tar.gz" > "$tmp/manifest"
-for required in install.sh framehands hands/build/fh-camd hands/build/fh-hands \
+for required in install.sh framehands .framehands-source-commit hands/build/fh-camd hands/build/fh-hands \
     hands/models/student/hand.ncnn.bin hands/models/ncnn/hand.ncnn.bin \
     renderer/build/framehands-view dashboard/build/framehands-dashboard \
     pointer/build/fh-input pointer/build/driver_fh_pointer.so \

@@ -51,6 +51,12 @@ The installer checks the hardware and SteamVR prerequisites. If your checkout do
 ~/.local/share/framehands/app/
 ```
 
+The release must contain the service files required by the checkout. Newer
+release archives also record the exact source commit; the installer rejects a
+different checkout before replacing the installed app. If you have pulled
+commits newer than the latest published release, publish a matching ARM64
+release before rerunning `./install.sh`.
+
 The installer also creates user-level services, installs the `framehands` command in `~/.local/bin/`, registers the FrameHands SteamVR driver and creates the dashboard application's OpenVR manifest. It creates `~/.config/framehands/config` only if that file does not already exist.
 
 > **Existing locally compiled binaries take precedence:** If the checkout contains all expected built binaries, `./install.sh` uses them instead of downloading GitHub Releases. Use a clean source-only checkout if you specifically want the published release binaries.
@@ -190,7 +196,7 @@ Common settings:
 | `TRACKING` | `1` | Enable or disable hand tracking. |
 | `RENDER` | `1` | Display the white 3D hand overlays; the Hand Visuals control changes this live. |
 | `GESTURE_INPUT` | `0` | Enable the virtual pointer for the SteamVR dashboard. |
-| `PAUSE_IN_GAMES` | `0` | Pause FrameHands services while a local or streamed VR scene is active. |
+| `PAUSE_IN_GAMES` | `0` | Pause FrameHands services while SteamVR identifies a Steam game scene. |
 | `HANDS_TOUCH` | `0` | Enable fingertip contact on supported SteamVR overlays; also starts the virtual pointer. |
 | `HANDS_POINTER_SMOOTH` | `1` | Adaptive smoothing of the dashboard ray; `0` disables it. |
 | `HANDS_PINCH_BEGIN` | `0.025` | Index-pinch activation distance in **metres** (25 mm). |
@@ -383,13 +389,18 @@ FrameHands retains hand tracking, camera broker and rendering work from [Frameto
 ## Floating panels, direct touch, smoothness, and recovery
 
 The **Pause for Games** dashboard toggle enables a separate OpenVR scene monitor.
-When a VR scene starts, it stops the FrameHands camera broker, tracker, hand
+When SteamVR identifies a Steam game scene, it stops the FrameHands camera broker, tracker, hand
 renderer and input helper. It leaves the dashboard and SteamVR running. After
 the scene closes, it starts only the services selected by the saved FrameHands
 settings. The option is off by default and can also be changed with
-`framehands games-on` or `framehands games-off`. Streamed games must be checked
-on the headset: the monitor relies on the headset's OpenVR current scene
-process, which has not been verified for every streaming mode.
+`framehands games-on` or `framehands games-off`. SteamVR Home and unidentified
+scenes leave tracking running. Streamed games must be checked on the headset:
+the monitor relies on the headset's OpenVR scene application key, which has
+not been verified for every streaming mode. A desktop Chromium window or
+other application shown on a floated screen does not count unless SteamVR
+actually makes it the active VR scene with a Steam app key. OpenVR does not
+identify whether every such scene is a game, so leave the toggle off for
+unusual VR browser or theatre apps until their app keys are checked.
 
 The hand pointer now remains available while the SteamVR dashboard is hidden
 (`HANDS_FLOATING_POINTER=1`), permitting SteamVR to route its synthetic
