@@ -31,7 +31,7 @@ for required in install.sh framehands hands/build/fh-camd hands/build/fh-hands \
     pointer/build/fh-input pointer/build/driver_fh_pointer.so \
     pointer/driver/fh_pointer/bin/linuxarm64/driver_fh_pointer.so \
     pointer/driver/fh_pointer/driver.vrdrivermanifest config/default.conf \
-    services/framehands-input.service licenses/jsoncpp-LICENSE; do
+    services/framehands-input.service services/framehands-game-monitor.service licenses/jsoncpp-LICENSE; do
   grep -Fxq "./$required" "$tmp/manifest" || { echo "release is missing $required" >&2; exit 1; }
 done
 (cd "$out" && sha256sum framehands-aarch64.tar.gz > SHA256SUMS)

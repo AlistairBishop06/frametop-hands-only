@@ -20,7 +20,7 @@ if (( purge_models && ! yes )); then
   read -r -p 'Delete cached FrameHands models? [y/N] ' answer || answer=
   [[ $answer == y || $answer == Y ]] || purge_models=0
 fi
-for unit in framehands-watchdog.service framehands-dashboard.service framehands-input.service framehands-view.service framehands-track.service framehands-camd.service; do
+for unit in framehands-game-monitor.service framehands-watchdog.service framehands-dashboard.service framehands-input.service framehands-view.service framehands-track.service framehands-camd.service; do
   file=$units/$unit
   if [[ -f $file ]] && grep -Fq "$app/" "$file"; then
     systemctl --user disable --now "$unit" 2>/dev/null || true

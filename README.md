@@ -17,6 +17,7 @@ FrameHands is derived from [Frametop](https://github.com/DeeJanuz/frametop) and 
 - **Optional SteamVR dashboard input:** Aim a hand ray, pinch to click, hold to drag and use the supported middle-pinch actions. A physical controller takes precedence when appropriate.
 - **On-demand control panel:** Open **FrameHands** from the Steam Frame's **+ → Launch Application** menu, toggle tracking and close the panel. The selected state persists.
 - **Separate services:** The hand tracker, renderer, camera broker and optional input helper can stop without removing the application launcher.
+- **Optional game pause:** Stop all FrameHands tracking services during an active VR game and resume them when it closes.
 - **Local configuration:** Settings live in your home folder and are retained across normal upgrades.
 
 FrameHands provides visual hand overlays and dashboard input, **not** native SteamVR skeletal input for arbitrary games. Games do not automatically gain hand controls merely because the overlays are visible.
@@ -189,6 +190,7 @@ Common settings:
 | `TRACKING` | `1` | Enable or disable hand tracking. |
 | `RENDER` | `1` | Display the white 3D hand overlays; the Hand Visuals control changes this live. |
 | `GESTURE_INPUT` | `0` | Enable the virtual pointer for the SteamVR dashboard. |
+| `PAUSE_IN_GAMES` | `0` | Pause FrameHands services while a local or streamed VR scene is active. |
 | `HANDS_TOUCH` | `0` | Enable fingertip contact on supported SteamVR overlays; also starts the virtual pointer. |
 | `HANDS_POINTER_SMOOTH` | `1` | Adaptive smoothing of the dashboard ray; `0` disables it. |
 | `HANDS_PINCH_BEGIN` | `0.025` | Index-pinch activation distance in **metres** (25 mm). |
@@ -239,6 +241,7 @@ Run the commands below using `~/.local/bin/framehands` if `~/.local/bin` is not 
 | `framehands stop` | Stops the four tracking-related services without changing their saved startup configuration. |
 | `framehands restart` | Restarts selected tracking-related services to apply tracker/renderer changes. |
 | `framehands sync` | Applies service enablement and starts/stops services to match the current configuration. |
+| `framehands games-on` / `games-off` | Enables or disables automatic pausing while a VR game is active. |
 | `framehands status` | Displays SteamVR and FrameHands service status and detected hands. |
 | `framehands gestures` | Prints tracked index pinch, grip and middle-pinch states. |
 | `framehands logs` | Shows recent FrameHands journal entries. |
@@ -378,6 +381,15 @@ The tracker publishes shared-memory data under `/run/user/$UID/framehands/`, inc
 FrameHands retains hand tracking, camera broker and rendering work from [Frametop](https://github.com/DeeJanuz/frametop), copyright © 2026 DeeJanuz, under the repository's MIT [`LICENSE`](LICENSE). The camera feed notice is in `hands/camd/LICENSE.FrameEyeCameraFeed`. Bundled stock models and fine-tuned model notices are provided in `hands/models/NOTICE`, with the fine-tuned model revision pinned by `hands/models.pin`. Rendered hand assets and their licences are under `renderer/assets/hands/`. The release also includes the pinned JsonCpp source licence.
 
 ## Floating panels, direct touch, smoothness, and recovery
+
+The **Pause for Games** dashboard toggle enables a separate OpenVR scene monitor.
+When a VR scene starts, it stops the FrameHands camera broker, tracker, hand
+renderer and input helper. It leaves the dashboard and SteamVR running. After
+the scene closes, it starts only the services selected by the saved FrameHands
+settings. The option is off by default and can also be changed with
+`framehands games-on` or `framehands games-off`. Streamed games must be checked
+on the headset: the monitor relies on the headset's OpenVR current scene
+process, which has not been verified for every streaming mode.
 
 The hand pointer now remains available while the SteamVR dashboard is hidden
 (`HANDS_FLOATING_POINTER=1`), permitting SteamVR to route its synthetic

@@ -14,6 +14,47 @@ cli = importlib.util.module_from_spec(spec)
 loader.exec_module(cli)
 
 class ControlTests(unittest.TestCase):
+    def test_game_pause_stops_stack_and_resume_restores_selected_services(self):
+        commands = []
+        def fake_ctl(*args, **_kwargs):
+            commands.append(args)
+            return SimpleNamespace(returncode=0, stderr="")
+        with tempfile.TemporaryDirectory() as tmp, patch.object(cli, "CONFIG", Path(tmp)/"config"), \
+             patch.object(cli, "RUN", Path(tmp)/"run"), patch.object(cli, "GAME_PAUSE", Path(tmp)/"run/game-paused"), \
+             patch.object(cli, "ctl", side_effect=fake_ctl), patch.object(cli, "active", return_value=True):
+            cli.CONFIG.write_text("TRACKING=1\nAUTO_START=1\nRENDER=0\nGESTURE_INPUT=1\n")
+            self.assertEqual(cli.main(["game-pause"]), 0)
+            self.assertTrue(cli.GAME_PAUSE.exists())
+            self.assertIn(("stop", *reversed(cli.UNITS)), commands)
+            commands.clear()
+            self.assertEqual(cli.main(["touch-on"]), 0)
+            self.assertFalse(any(c[0] == "start" and cli.UNITS[3] in c for c in commands))
+            commands.clear()
+            self.assertEqual(cli.main(["game-resume"]), 0)
+            self.assertFalse(cli.GAME_PAUSE.exists())
+            self.assertIn(("start", *cli.selected()), commands)
+            self.assertNotIn(cli.UNITS[2], cli.selected())
+
+    def test_game_toggle_runs_monitor_and_disable_resumes(self):
+        commands = []
+        def fake_ctl(*args, **_kwargs):
+            commands.append(args)
+            return SimpleNamespace(returncode=0, stderr="")
+        with tempfile.TemporaryDirectory() as tmp, patch.object(cli, "CONFIG", Path(tmp)/"config"), \
+             patch.object(cli, "RUN", Path(tmp)/"run"), patch.object(cli, "GAME_PAUSE", Path(tmp)/"run/game-paused"), \
+             patch.object(cli, "ctl", side_effect=fake_ctl), patch.object(cli, "active", return_value=True):
+            self.assertEqual(cli.main(["games-on"]), 0)
+            self.assertEqual(cli.config()["PAUSE_IN_GAMES"], "1")
+            self.assertIn(("enable", cli.GAME_MONITOR_UNIT), commands)
+            self.assertIn(("start", cli.GAME_MONITOR_UNIT), commands)
+            cli.GAME_PAUSE.parent.mkdir()
+            cli.GAME_PAUSE.touch()
+            commands.clear()
+            self.assertEqual(cli.main(["games-off"]), 0)
+            self.assertFalse(cli.GAME_PAUSE.exists())
+            self.assertIn(("stop", cli.GAME_MONITOR_UNIT), commands)
+            self.assertIn(("start", *cli.selected()), commands)
+
     def test_touch_and_smoothness_persist(self):
         commands = []
         def fake_ctl(*args, **_kwargs):

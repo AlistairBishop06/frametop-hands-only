@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 namespace {
-constexpr int W = 640, H = 480;
+constexpr int W = 640, H = 590;
 struct RGB { uint8_t r, g, b; };
 struct Box {
     int x0, y0, x1, y1;
@@ -29,7 +29,8 @@ constexpr Box kClose{580, 24, 626, 70};
 constexpr Box kTracking{28, 105, 612, 218};
 constexpr Box kVisuals{28, 232, 311, 345};
 constexpr Box kTouch{327, 232, 612, 345};
-constexpr Box kSlider{49, 407, 591, 462};
+constexpr Box kGamePause{28, 360, 612, 449};
+constexpr Box kSlider{49, 517, 591, 572};
 constexpr int kSliderLeft = 50, kSliderRight = 590;
 std::vector<uint8_t> pixels(W * H * 4);
 
@@ -163,6 +164,20 @@ bool VisualsEnabled() {
         else if (line == "RENDER=0") enabled = false;
     return enabled;
 }
+bool GamePauseEnabled() {
+    const char *home = std::getenv("HOME");
+    if (!home) return false;
+    std::ifstream f(std::filesystem::path(home) / ".config/framehands/config");
+    std::string line; bool enabled = false;
+    while (std::getline(f, line))
+        if (line == "PAUSE_IN_GAMES=1") enabled = true;
+        else if (line == "PAUSE_IN_GAMES=0") enabled = false;
+    return enabled;
+}
+bool GamePaused() {
+    const char *runtime = std::getenv("XDG_RUNTIME_DIR");
+    return runtime && std::filesystem::exists(std::filesystem::path(runtime) / "framehands/game-paused");
+}
 int Smoothness() {
     const char *home = std::getenv("HOME");
     if (!home) return 50;
@@ -173,7 +188,7 @@ int Smoothness() {
     }
     return std::clamp(level, 0, 100);
 }
-void Paint(bool enabled, bool visuals, bool touch, int smoothness, bool busy, bool failed) {
+void Paint(bool enabled, bool visuals, bool touch, bool gamePause, int smoothness, bool busy, bool failed) {
     const RGB ink{236, 245, 251}, muted{151, 174, 195}, teal{80, 219, 180};
     for (int y = 0; y < H; ++y)
         for (int x = 0; x < W; ++x) {
@@ -196,13 +211,14 @@ void Paint(bool enabled, bool visuals, bool touch, int smoothness, bool busy, bo
     TextAt(92, 32, "FRAMEHANDS", 4, ink);
     TextAt(94, 68, "STEAM FRAME CONTROLS", 2, muted);
 
+    const bool paused = gamePause && GamePaused();
     const RGB status = failed ? RGB{72, 43, 44} : busy ? RGB{50, 64, 82} :
-                       enabled ? RGB{25, 75, 70} : RGB{56, 67, 80};
+                       paused ? RGB{84, 67, 42} : enabled ? RGB{25, 75, 70} : RGB{56, 67, 80};
     RoundRect({394, 34, 574, 69}, 17, status);
     Circle(410, 51, 5, failed ? RGB{255, 149, 132} : busy ? RGB{255, 194, 103} :
-                         enabled ? teal : RGB{153, 170, 185});
+                         paused ? RGB{255, 194, 103} : enabled ? teal : RGB{153, 170, 185});
     TextAt(423, 43, failed ? "CHECK LOGS" : busy ? "UPDATING" :
-           enabled ? "TRACKING ON" : "TRACKING OFF", 2, ink);
+           paused ? "GAME PAUSED" : enabled ? "TRACKING ON" : "TRACKING OFF", 2, ink);
     // Closing this panel never changes tracking.
     RoundRect(kClose, 14, {33, 48, 66});
     for (int i = 0; i < 14; ++i) {
@@ -235,17 +251,25 @@ void Paint(bool enabled, bool visuals, bool touch, int smoothness, bool busy, bo
            touch && enabled ? teal : muted);
     Toggle(531, 292, touch);
 
-    RoundRect({28, 364, 612, 469}, 18, {5, 11, 22});
-    RoundRect({28, 360, 612, 465}, 18, {23, 37, 55});
-    TextAt(50, 377, "SMOOTHNESS", 2, ink);
-    TextAt(520, 377, std::to_string(std::clamp(smoothness, 0, 100)), 2, teal);
-    RoundRect({kSliderLeft, 418, kSliderRight, 434}, 8, {53, 70, 89});
+    RoundRect({28, 364, 612, 453}, 18, {5, 11, 22});
+    RoundRect(kGamePause, 18, {23, 37, 55});
+    TextAt(50, 376, "PAUSE FOR GAMES", 2, ink);
+    TextAt(50, 410, "LOCAL OR STREAMED VR", 2, muted);
+    TextAt(50, 431, gamePause ? (paused ? "TRACKING PAUSED" : "AUTOMATIC") : "DISABLED", 2,
+           paused ? RGB{236, 188, 116} : muted);
+    Toggle(514, 385, gamePause);
+
+    RoundRect({28, 474, 612, 579}, 18, {5, 11, 22});
+    RoundRect({28, 470, 612, 575}, 18, {23, 37, 55});
+    TextAt(50, 487, "SMOOTHNESS", 2, ink);
+    TextAt(520, 487, std::to_string(std::clamp(smoothness, 0, 100)), 2, teal);
+    RoundRect({kSliderLeft, 528, kSliderRight, 544}, 8, {53, 70, 89});
     const int knob = kSliderLeft + (kSliderRight-kSliderLeft) * std::clamp(smoothness, 0, 100) / 100;
-    if (knob > kSliderLeft) RoundRect({kSliderLeft, 418, knob, 434}, 8, {56, 177, 164});
-    Circle(knob, 426, 13, ink);
-    Circle(knob, 426, 5, {51, 166, 156});
-    TextAt(50, 443, "LESS", 2, muted);
-    TextAt(542, 443, "MORE", 2, muted);
+    if (knob > kSliderLeft) RoundRect({kSliderLeft, 528, knob, 544}, 8, {56, 177, 164});
+    Circle(knob, 536, 13, ink);
+    Circle(knob, 536, 5, {51, 166, 156});
+    TextAt(50, 553, "LESS", 2, muted);
+    TextAt(542, 553, "MORE", 2, muted);
 }
 int SmoothnessAt(float x) {
     return std::clamp(int(std::lround((x - kSliderLeft) * 100.0f / (kSliderRight-kSliderLeft))), 0, 100);
@@ -262,9 +286,40 @@ int RegisterManifest(bool remove) {
     vr::VR_Shutdown();
     return result == vr::VRApplicationError_None ? 0 : 1;
 }
+int GameMonitor() {
+    vr::EVRInitError error = vr::VRInitError_None;
+    vr::VR_Init(&error, vr::VRApplication_Background);
+    if (error != vr::VRInitError_None) return 1;
+    bool paused = GamePaused();
+    int gameTicks = 0, idleTicks = 0;
+    while (true) {
+        const bool game = vr::VRApplications()->GetCurrentSceneProcessId() != 0;
+        gameTicks = game ? std::min(gameTicks + 1, 4) : 0;
+        idleTicks = game ? 0 : std::min(idleTicks + 1, 4);
+        if ((gameTicks >= 2 && !paused) || (idleTicks >= 4 && paused)) {
+            const char *command = game ? "game-pause" : "game-resume";
+            const pid_t child = fork();
+            if (child == 0) {
+                const std::string cli = Cli().string();
+                execl(cli.c_str(), cli.c_str(), command, (char *)nullptr);
+                _exit(127);
+            }
+            int status = 0;
+            if (child > 0 && waitpid(child, &status, 0) == child &&
+                WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                paused = game;
+                std::cerr << "framehands game monitor: " << (paused ? "paused" : "resumed") << '\n';
+            } else {
+                std::cerr << "framehands game monitor: " << command << " failed\n";
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+}
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !std::strcmp(argv[1], "--monitor-games")) return GameMonitor();
     if (argc == 2 && !std::strcmp(argv[1], "--unregister")) return RegisterManifest(true);
     if (argc == 2 && !std::strcmp(argv[1], "--register")) return RegisterManifest(false);
     vr::EVRInitError error = vr::VRInitError_None;
@@ -308,13 +363,14 @@ int main(int argc, char **argv) {
     }
     vr::VROverlay()->SetOverlayRaw(thumb, thumbnail.data(), 64, 64, 4);
 
-    bool enabled = Enabled(), visuals = VisualsEnabled(), touch = TouchEnabled(), busy = false, failed = false;
+    bool enabled = Enabled(), visuals = VisualsEnabled(), touch = TouchEnabled();
+    bool gamePause = GamePauseEnabled(), pausedState = GamePaused(), busy = false, failed = false;
     int smoothness = Smoothness();
     bool sliding = false;
     pid_t child = -1;
     auto next = std::chrono::steady_clock::now();
     auto nextSliderDraw = next;
-    Paint(enabled, visuals, touch, smoothness, busy, failed);
+    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
     // Opening FrameHands from + selects this panel immediately.
     vr::VROverlay()->ShowDashboard("framehands.dashboard");
@@ -339,7 +395,7 @@ int main(int argc, char **argv) {
                     smoothness = value;
                     if (std::chrono::steady_clock::now() >= nextSliderDraw) {
                         nextSliderDraw = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
-                        Paint(enabled, visuals, touch, smoothness, busy, failed);
+                        Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                         vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     }
                 }
@@ -354,7 +410,7 @@ int main(int argc, char **argv) {
                     _exit(127);
                 }
                 busy = child > 0; failed = child < 0;
-                Paint(enabled, visuals, touch, smoothness, busy, failed);
+                Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
             if (event.eventType == vr::VREvent_MouseButtonDown && !busy) {
@@ -369,7 +425,7 @@ int main(int argc, char **argv) {
                     sliding = true;
                     smoothness = SmoothnessAt(x);
                     nextSliderDraw = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
-                    Paint(enabled, visuals, touch, smoothness, busy, failed);
+                    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     continue;
                 }
@@ -382,7 +438,7 @@ int main(int argc, char **argv) {
                         _exit(127);
                     }
                     busy = child > 0; failed = child < 0;
-                    Paint(enabled, visuals, touch, smoothness, busy, failed);
+                    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     continue;
                 }
@@ -395,7 +451,19 @@ int main(int argc, char **argv) {
                         _exit(127);
                     }
                     busy = child > 0; failed = child < 0;
-                    Paint(enabled, visuals, touch, smoothness, busy, failed);
+                    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                    vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+                    continue;
+                }
+                if (kGamePause.Contains(x, y)) {
+                    child = fork();
+                    if (child == 0) {
+                        const std::string cli = Cli().string();
+                        execl(cli.c_str(), cli.c_str(), gamePause ? "games-off" : "games-on", (char *)nullptr);
+                        _exit(127);
+                    }
+                    busy = child > 0; failed = child < 0;
+                    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     continue;
                 }
@@ -409,7 +477,7 @@ int main(int argc, char **argv) {
                 }
                 busy = child > 0;
                 failed = child < 0;
-                Paint(enabled, visuals, touch, smoothness, busy, failed);
+                Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
         }
@@ -428,18 +496,23 @@ int main(int argc, char **argv) {
                 enabled = Enabled();
                 visuals = VisualsEnabled();
                 touch = TouchEnabled();
+                gamePause = GamePauseEnabled();
+                pausedState = GamePaused();
                 smoothness = Smoothness();
-                Paint(enabled, visuals, touch, smoothness, busy, failed);
+                Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
         }
         if (std::chrono::steady_clock::now() >= next && !busy) {
             next = std::chrono::steady_clock::now() + std::chrono::milliseconds(800);
             const bool current = Enabled(), currentVisuals = VisualsEnabled(), currentTouch = TouchEnabled();
+            const bool currentGamePause = GamePauseEnabled(), currentPaused = GamePaused();
             const int currentSmooth = Smoothness();
-            if (!sliding && (current != enabled || currentVisuals != visuals || currentTouch != touch || currentSmooth != smoothness)) {
-                enabled = current; visuals = currentVisuals; touch = currentTouch; smoothness = currentSmooth;
-                Paint(enabled, visuals, touch, smoothness, busy, failed);
+            if (!sliding && (current != enabled || currentVisuals != visuals || currentTouch != touch ||
+                             currentGamePause != gamePause || currentPaused != pausedState || currentSmooth != smoothness)) {
+                enabled = current; visuals = currentVisuals; touch = currentTouch;
+                gamePause = currentGamePause; pausedState = currentPaused; smoothness = currentSmooth;
+                Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
         }

@@ -19,5 +19,6 @@ if any(not ok for ok in checks.values()):
     print("Retest fh-camd camera attachment and calibration before using FrameHands.")
 print("Retest the OpenVR DMA-BUF hand overlay and Room View detection on the headset after a SteamVR update.")
 print("Retest the FrameHands driver role handoff, dashboard ray, pinch press/release, and physical controllers after a SteamVR update.")
+print("Retest PAUSE_IN_GAMES with a local scene game and a streamed VR game, including resume on exit; check GetCurrentSceneProcessId on the Frame.")
 print("Retest Direct Touch overlay discovery, GetTransformForOverlayCoordinates, and fingertip contact on the dashboard and floated panels after a SteamVR update.")
 sys.exit(0 if all(checks.values()) else 1)
