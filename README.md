@@ -33,6 +33,12 @@ Before installing, make sure:
 3. You can use **Konsole** on the Frame, either locally or through SSH/remote desktop.
 4. You have your SteamOS user's `sudo` password available for setting the camera broker's capabilities.
 
+Run `./install.sh` as `steamos`, without prefixing it with `sudo`. The installer
+uses `sudo` only when setting capabilities on its own camera broker. It also
+needs the running `steamos` systemd user manager. If the user bus is absent,
+log into the Frame's SteamOS session and rerun the installer from Konsole;
+developer mode and a password alone do not start a user manager.
+
 No system-wide package installation or immutable-root modification is required for installation from a prebuilt release.
 
 ### 1. Download and install
@@ -394,9 +400,14 @@ renderer and input helper. It leaves the dashboard and SteamVR running. After
 the scene closes, it starts only the services selected by the saved FrameHands
 settings. The option is off by default and can also be changed with
 `framehands games-on` or `framehands games-off`. SteamVR Home and unidentified
-scenes leave tracking running. Streamed games must be checked on the headset:
-the monitor relies on the headset's OpenVR scene application key, which has
-not been verified for every streaming mode. A desktop Chromium window or
+scenes leave tracking running. A PC-streamed game may only appear as Steam Link
+on the headset, so automatic pause is not yet reliable for streaming. Until a
+streamed game's start and end can be identified on the Frame, run
+`framehands game-pause` before starting a PC VR stream and
+`framehands game-resume` after ending it. This stops the camera broker, tracker,
+hand renderer, and input helper and disconnects the virtual hand pointer. The
+pointer remains registered in SteamVR until its next startup because OpenVR
+does not provide a live device-removal call. A desktop Chromium window or
 other application shown on a floated screen does not count unless SteamVR
 actually makes it the active VR scene with a Steam app key. OpenVR does not
 identify whether every such scene is a game, so leave the toggle off for

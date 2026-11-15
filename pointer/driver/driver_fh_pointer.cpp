@@ -9,12 +9,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -71,7 +73,11 @@ HmdQuaternion_t QuatFromMatrix(const float (&m)[3][4]) {
 
 class PointerDevice : public ITrackedDeviceServerDriver {
 public:
-    explicit PointerDevice(State *state) : state_(state) {}
+    explicit PointerDevice(State *state) : state_(state) {
+        const char *runtime = std::getenv("XDG_RUNTIME_DIR");
+        pauseMarker_ = (runtime ? std::string(runtime) : "/run/user/" + std::to_string(getuid())) +
+                       "/framehands/game-paused";
+    }
 
     EVRInitError Activate(uint32_t objectId) override {
         objectId_ = objectId;
@@ -123,7 +129,9 @@ public:
         State snapshot;
         {
             std::lock_guard<std::mutex> guard(state_->lock);
-            if (std::chrono::steady_clock::now() - state_->lastCommand > std::chrono::milliseconds(500)) {
+            struct stat markerInfo{};
+            const bool paused = stat(pauseMarker_.c_str(), &markerInfo) == 0;
+            if (paused || std::chrono::steady_clock::now() - state_->lastCommand > std::chrono::milliseconds(500)) {
                 state_->visible = false;
                 for (bool &button : state_->buttons) button = false;
                 for (bool &button : state_->pressed) button = false;
@@ -195,6 +203,7 @@ public:
 
 private:
     State *state_;
+    std::string pauseMarker_;
     uint32_t objectId_ = k_unTrackedDeviceIndexInvalid;
     PropertyContainerHandle_t container_ = k_ulInvalidPropertyContainer;
     int32_t role_ = TrackedControllerRole_RightHand;

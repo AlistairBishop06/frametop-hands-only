@@ -24,7 +24,22 @@ command -v systemctl >/dev/null || fail 'systemd user services are required'
 command -v getcap >/dev/null || fail 'getcap is required to verify camera capabilities'
 reg=/opt/steamvr/bin/linuxarm64/vrpathreg
 [[ -x $reg ]] || fail 'SteamVR driver registration tool is missing'
-if [[ $(id -u) != 0 ]]; then command -v sudo >/dev/null || fail 'sudo is required to set camera capabilities'; fi
+uid=$(id -u)
+(( uid != 0 )) || fail 'run ./install.sh as the steamos user, without sudo (the installer requests sudo only for setcap)'
+command -v sudo >/dev/null || fail 'sudo is required to set camera capabilities'
+# An SSH or remote-desktop shell may omit these variables even when the user's
+# systemd manager is running. Use that manager's existing bus, never a root bus.
+if [[ -n ${XDG_RUNTIME_DIR:-} && -S $XDG_RUNTIME_DIR/bus ]]; then
+  runtime_dir=$XDG_RUNTIME_DIR
+elif [[ -S /run/user/$uid/bus ]]; then
+  runtime_dir=/run/user/$uid
+else
+  fail "the steamos user service bus is unavailable (/run/user/$uid/bus). Log into the Frame's SteamOS session as steamos and rerun ./install.sh without sudo"
+fi
+export XDG_RUNTIME_DIR=$runtime_dir
+export DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime_dir/bus
+systemctl --user show-environment >/dev/null 2>&1 ||
+  fail 'cannot reach the steamos user service manager; run ./install.sh from a steamos session without sudo'
 [[ ! -L $app ]] || fail 'FrameHands app path is a symlink; refusing to replace it'
 for unit in framehands-camd.service framehands-track.service framehands-view.service framehands-input.service framehands-dashboard.service framehands-watchdog.service framehands-game-monitor.service; do
   file=$units/$unit
@@ -91,6 +106,7 @@ if (( downloaded_release )) && [[ -f $source_dir/.framehands-source-commit ]]; t
 fi
 
 stage=$HOME/.local/share/framehands/app.new.$$
+mkdir -p "$HOME/.local/share/framehands"
 [[ ! -e $stage && ! -L $stage ]] || fail 'temporary install path already exists'
 mkdir -m 700 "$stage"
 mkdir -p "$stage/hands/build" "$stage/hands/camd" "$stage/renderer/build" "$stage/renderer/assets" "$stage/pointer/build" "$stage/pointer/driver/fh_pointer/bin/linuxarm64" "$stage/config" "$stage/services" "$stage/licenses" "$stage/dashboard/build"
