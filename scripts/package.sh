@@ -6,7 +6,7 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/hands/build" "$tmp/hands/camd" "$tmp/hands/models" "$tmp/renderer/build" "$tmp/renderer/assets" "$tmp/pointer/build" "$tmp/pointer/driver/fh_pointer/bin/linuxarm64" "$tmp/config" "$tmp/services" "$tmp/licenses" "$tmp/dashboard/build"
+mkdir -p "$tmp/hands/build" "$tmp/hands/camd" "$tmp/hands/models" "$tmp/renderer/build" "$tmp/renderer/assets" "$tmp/pointer/build" "$tmp/pointer/driver/fh_pointer/bin/linuxarm64" "$tmp/config" "$tmp/services" "$tmp/licenses" "$tmp/dashboard/build" "$tmp/scripts"
 cp "$root/hands/build/fh-camd" "$root/hands/build/fh-hands" "$tmp/hands/build/"
 cp "$root/hands/camd/LICENSE.FrameEyeCameraFeed" "$tmp/hands/camd/"
 cp "$root/hands/build/jsoncpp/src/jsoncpp-89e2973c754a9c02a49974d839779b151e95afd6/LICENSE" "$tmp/licenses/jsoncpp-LICENSE"
@@ -22,11 +22,13 @@ cp "$root/pointer/build/driver_fh_pointer.so" "$tmp/pointer/driver/fh_pointer/bi
 cp "$root/config/default.conf" "$tmp/config/"
 cp "$root/services/"*.service "$tmp/services/"
 cp "$root/framehands" "$root/install.sh" "$root/uninstall.sh" "$root/README.md" "$root/LICENSE" "$tmp/"
+cp "$root/scripts/framehands-updater.py" "$tmp/scripts/"
+printf '%s\n' "${GITHUB_REF_NAME:-v0.0.0}" > "$tmp/.framehands-release-tag"
 git -C "$root" rev-parse HEAD > "$tmp/.framehands-source-commit"
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
     -C "$tmp" -czf "$out/framehands-aarch64.tar.gz" .
 tar -tzf "$out/framehands-aarch64.tar.gz" > "$tmp/manifest"
-for required in install.sh framehands .framehands-source-commit hands/build/fh-camd hands/build/fh-hands \
+for required in install.sh framehands .framehands-source-commit .framehands-release-tag scripts/framehands-updater.py hands/build/fh-camd hands/build/fh-hands \
     hands/models/student/hand.ncnn.bin hands/models/ncnn/hand.ncnn.bin \
     renderer/build/framehands-view dashboard/build/framehands-dashboard \
     pointer/build/fh-input pointer/build/driver_fh_pointer.so \

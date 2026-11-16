@@ -91,6 +91,7 @@ for bin in hands/build/fh-camd hands/build/fh-hands renderer/build/framehands-vi
 done
 [[ -f $source_dir/pointer/build/driver_fh_pointer.so ]] || fail 'the SteamVR input driver is missing'
 [[ -x $source_dir/dashboard/build/framehands-dashboard ]] || fail 'the dashboard controller is missing'
+[[ -f $source_dir/scripts/framehands-updater.py ]] || fail 'the release updater is missing'
 [[ -f $source_dir/hands/models/student/hand.ncnn.bin ]] ||
   fail 'the pinned fine-tuned models are missing from the release'
 [[ -f $source_dir/hands/models/ncnn/hand.ncnn.bin ]] || fail 'the stock fallback model is missing'
@@ -109,7 +110,7 @@ stage=$HOME/.local/share/framehands/app.new.$$
 mkdir -p "$HOME/.local/share/framehands"
 [[ ! -e $stage && ! -L $stage ]] || fail 'temporary install path already exists'
 mkdir -m 700 "$stage"
-mkdir -p "$stage/hands/build" "$stage/hands/camd" "$stage/renderer/build" "$stage/renderer/assets" "$stage/pointer/build" "$stage/pointer/driver/fh_pointer/bin/linuxarm64" "$stage/config" "$stage/services" "$stage/licenses" "$stage/dashboard/build"
+mkdir -p "$stage/hands/build" "$stage/hands/camd" "$stage/renderer/build" "$stage/renderer/assets" "$stage/pointer/build" "$stage/pointer/driver/fh_pointer/bin/linuxarm64" "$stage/config" "$stage/services" "$stage/licenses" "$stage/dashboard/build" "$stage/scripts"
 cp -a "$source_dir/hands/build/fh-camd" "$source_dir/hands/build/fh-hands" "$stage/hands/build/"
 cp -a "$source_dir/hands/camd/LICENSE.FrameEyeCameraFeed" "$stage/hands/camd/"
 if [[ -f $source_dir/licenses/jsoncpp-LICENSE ]]; then
@@ -128,6 +129,10 @@ cp -a "$source_dir/pointer/build/driver_fh_pointer.so" "$stage/pointer/driver/fh
 cp -a "$source_dir/config/default.conf" "$stage/config/"
 cp -a "$source_dir/services/". "$stage/services/"
 cp -a "$source_dir/framehands" "$stage/framehands"
+cp -a "$source_dir/scripts/framehands-updater.py" "$stage/scripts/"
+if [[ -f $source_dir/.framehands-release-tag ]]; then
+  cp -a "$source_dir/.framehands-release-tag" "$stage/"
+fi
 cp -a "$source_dir/LICENSE" "$stage/LICENSE"
 chmod 755 "$stage/framehands"
 mkdir -p "$HOME/.config/framehands" "$HOME/.local/bin" "$units"
@@ -142,7 +147,15 @@ caps=cap_sys_ptrace,cap_perfmon,cap_dac_read_search+ep
 if [[ $(id -u) == 0 ]]; then
   setcap "$caps" "$stage/hands/build/fh-camd"
 else
-  sudo setcap "$caps" "$stage/hands/build/fh-camd" || fail 'camera capabilities could not be set'
+  if [[ ${FRAMEHANDS_NONINTERACTIVE:-0} == 1 ]]; then
+    if [[ ${FRAMEHANDS_SUDO_FD:-} == 3 ]]; then
+      sudo -S -p '' setcap "$caps" "$stage/hands/build/fh-camd" <&3 || fail 'camera capabilities could not be set'
+    else
+      sudo -n setcap "$caps" "$stage/hands/build/fh-camd" || fail 'camera capabilities could not be set without a password prompt'
+    fi
+  else
+    sudo setcap "$caps" "$stage/hands/build/fh-camd" || fail 'camera capabilities could not be set'
+  fi
 fi
 getcap "$stage/hands/build/fh-camd" | grep -q cap_sys_ptrace || fail 'camera capabilities were not applied'
 
@@ -217,7 +230,13 @@ fi
 if [[ -d $old ]]; then
   old_bin=$old/hands/build/fh-camd
   if [[ -f $old_bin ]] && getcap "$old_bin" | grep -q cap_sys_ptrace; then
-    if [[ $(id -u) == 0 ]]; then setcap -r "$old_bin"; else sudo setcap -r "$old_bin"; fi
+    if [[ $(id -u) == 0 ]]; then
+      setcap -r "$old_bin"
+    elif [[ ${FRAMEHANDS_SUDO_FD:-} == 3 ]]; then
+      sudo -S -p '' setcap -r "$old_bin" <&3
+    else
+      sudo setcap -r "$old_bin"
+    fi
   fi
   rm -rf "$old"
 fi

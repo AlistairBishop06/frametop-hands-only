@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -20,7 +21,7 @@
 #include <unistd.h>
 
 namespace {
-constexpr int W = 640, H = 590;
+constexpr int W = 640, H = 680;
 struct RGB { uint8_t r, g, b; };
 struct Box {
     int x0, y0, x1, y1;
@@ -32,8 +33,10 @@ constexpr Box kVisuals{28, 232, 311, 345};
 constexpr Box kTouch{327, 232, 612, 345};
 constexpr Box kGamePause{28, 360, 612, 449};
 constexpr Box kSlider{49, 517, 591, 572};
+constexpr Box kUpdate{28, 592, 612, 660};
 constexpr int kSliderLeft = 50, kSliderRight = 590;
 std::vector<uint8_t> pixels(W * H * 4);
+std::string updateStatus = "CHECK FOR UPDATES";
 
 // Five-wide bitmap capitals keep this app entirely self-contained on ARM64.
 const uint8_t *Glyph(char c) {
@@ -130,6 +133,16 @@ std::filesystem::path AppRoot() {
 }
 std::filesystem::path Manifest() { return AppRoot() / "dashboard/framehands.vrmanifest"; }
 std::filesystem::path Cli() { return AppRoot() / "framehands"; }
+std::filesystem::path Updater() { return AppRoot() / "scripts/framehands-updater.py"; }
+std::filesystem::path UpdateStatusFile() {
+    const char *home = std::getenv("HOME");
+    return std::filesystem::path(home ? home : "/nonexistent") / ".cache/framehands/update-status";
+}
+void ReadUpdateStatus() {
+    std::ifstream in(UpdateStatusFile());
+    std::string line;
+    if (std::getline(in, line) && !line.empty()) updateStatus = line;
+}
 
 bool Enabled() {
     const char *home = std::getenv("HOME");
@@ -271,6 +284,14 @@ void Paint(bool enabled, bool visuals, bool touch, bool gamePause, int smoothnes
     Circle(knob, 536, 5, {51, 166, 156});
     TextAt(50, 553, "LESS", 2, muted);
     TextAt(542, 553, "MORE", 2, muted);
+    RoundRect(kUpdate, 18, {25, 56, 70});
+    TextAt(50, 605, "UPDATES", 2, ink);
+    const std::string shownUpdate = updateStatus.rfind("AVAILABLE ", 0) == 0
+        ? "DOWNLOAD " + updateStatus.substr(10) : updateStatus;
+    const std::string label = shownUpdate.size() > 28 ? shownUpdate.substr(0, 28) : shownUpdate;
+    TextAt(50, 633, label, 2, updateStatus.rfind("ERROR", 0) == 0 ? RGB{255, 149, 132} : teal);
+    if (updateStatus == "SUDO REQUIRED")
+        TextAt(300, 637, "USE KONSOLE FOR PASSWORD", 1, muted);
 }
 int SmoothnessAt(float x) {
     return std::clamp(int(std::lround((x - kSliderLeft) * 100.0f / (kSliderRight-kSliderLeft))), 0, 100);
@@ -374,11 +395,13 @@ int main(int argc, char **argv) {
         thumbnail[i+3] = 255;
     }
     vr::VROverlay()->SetOverlayRaw(thumb, thumbnail.data(), 64, 64, 4);
+    std::signal(SIGPIPE, SIG_IGN); // a failed updater must not terminate the panel
 
     bool enabled = Enabled(), visuals = VisualsEnabled(), touch = TouchEnabled();
     bool gamePause = GamePauseEnabled(), pausedState = GamePaused(), busy = false, failed = false;
     int smoothness = Smoothness();
-    bool sliding = false;
+    bool sliding = false, updateChild = false, awaitingPassword = false;
+    std::string updateVersion;
     pid_t child = -1;
     auto next = std::chrono::steady_clock::now();
     auto nextSliderDraw = next;
@@ -388,9 +411,68 @@ int main(int argc, char **argv) {
     vr::VROverlay()->ShowDashboard("framehands.dashboard");
     bool running = true;
     bool wasActive = false;
+    auto passwordEvent = [&](uint32_t type) {
+        if (!awaitingPassword) return;
+        if (type == vr::VREvent_KeyboardClosed || type == vr::VREvent_KeyboardClosed_Global) {
+            awaitingPassword = false;
+            updateStatus = "UPDATE CANCELLED";
+        } else if (type == vr::VREvent_KeyboardDone) {
+            awaitingPassword = false;
+            char password[128]{};
+            const uint32_t length = vr::VROverlay()->GetKeyboardText(password, sizeof password);
+            password[sizeof password - 1] = 0;
+            if (!length || length > sizeof password || !password[0] ||
+                std::strchr(password, '\n') || std::strchr(password, '\r')) {
+                updateStatus = "PASSWORD REQUIRED";
+            } else {
+                int auth[2];
+                if (pipe(auth) != 0) {
+                    updateStatus = "UPDATE ERROR";
+                } else {
+                    child = fork();
+                    if (child == 0) {
+                        close(auth[1]);
+                        if (auth[0] != 3 && dup2(auth[0], 3) < 0) _exit(127);
+                        if (auth[0] != 3) close(auth[0]);
+                        setenv("FRAMEHANDS_SUDO_FD", "3", 1);
+                        const std::string updater = Updater().string();
+                        execlp("python3", "python3", updater.c_str(), "install", updateVersion.c_str(), (char *)nullptr);
+                        _exit(127);
+                    }
+                    close(auth[0]);
+                    if (child > 0) {
+                        const size_t count = std::strlen(password);
+                        // Two setcap calls may need authentication: the new
+                        // broker and removal of capabilities on the old one.
+                        for (int i = 0; i < 2; ++i) {
+                            if (write(auth[1], password, count) != ssize_t(count) ||
+                                write(auth[1], "\n", 1) != 1) break;
+                        }
+                        updateChild = busy = true;
+                        failed = false;
+                        updateStatus = "DOWNLOADING";
+                    } else {
+                        updateStatus = "UPDATE ERROR";
+                        failed = true;
+                    }
+                    close(auth[1]);
+                }
+            }
+            volatile char *wipe = password;
+            for (size_t i = 0; i < sizeof password; ++i) wipe[i] = 0;
+        } else return;
+        Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+        vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+    };
     while (running) {
         vr::VREvent_t event{};
         while (running && vr::VROverlay()->PollNextOverlayEvent(mainOverlay, &event, sizeof event)) {
+            if (event.eventType == vr::VREvent_KeyboardDone ||
+                event.eventType == vr::VREvent_KeyboardClosed ||
+                event.eventType == vr::VREvent_KeyboardClosed_Global) {
+                passwordEvent(event.eventType);
+                continue;
+            }
             if (event.eventType == vr::VREvent_OverlayClosed ||
                 event.eventType == vr::VREvent_Quit) {
                 running = false;
@@ -431,6 +513,34 @@ int main(int argc, char **argv) {
                 if (kClose.Contains(x, y)) {
                     running = false;
                     break;
+                }
+                if (kUpdate.Contains(x, y)) {
+                    const bool install = updateStatus.rfind("AVAILABLE ", 0) == 0;
+                    const std::string version = install ? updateStatus.substr(10) : "";
+                    if (install) {
+                        updateVersion = version;
+                        const auto shown = vr::VROverlay()->ShowKeyboardForOverlay(
+                            mainOverlay, vr::k_EGamepadTextInputModePassword,
+                            vr::k_EGamepadTextInputLineModeSingleLine, vr::KeyboardFlag_Modal,
+                            "STEAMOS PASSWORD FOR FRAMEHANDS UPDATE", 127, "", 0);
+                        awaitingPassword = shown == vr::VROverlayError_None;
+                        updateStatus = awaitingPassword ? "ENTER STEAMOS PASSWORD" : "KEYBOARD UNAVAILABLE";
+                        Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                        vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+                        continue;
+                    }
+                    updateStatus = "CHECKING";
+                    child = fork();
+                    if (child == 0) {
+                        const std::string updater = Updater().string();
+                        execlp("python3", "python3", updater.c_str(), "check", (char *)nullptr);
+                        _exit(127);
+                    }
+                    updateChild = child > 0;
+                    busy = child > 0; failed = child < 0;
+                    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                    vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+                    continue;
                 }
                 // Slider changes are committed on mouse-up, not on every move.
                 if (kSlider.Contains(x, y)) {
@@ -493,9 +603,13 @@ int main(int argc, char **argv) {
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
         }
-        while (vr::VRSystem()->PollNextEvent(&event, sizeof event))
+        while (vr::VRSystem()->PollNextEvent(&event, sizeof event)) {
+            if (event.eventType == vr::VREvent_KeyboardDone ||
+                event.eventType == vr::VREvent_KeyboardClosed ||
+                event.eventType == vr::VREvent_KeyboardClosed_Global) passwordEvent(event.eventType);
             if (event.eventType == vr::VREvent_Quit ||
                 event.eventType == vr::VREvent_OverlayClosed) running = false;
+        }
         if (vr::VROverlay()->IsActiveDashboardOverlay(mainOverlay)) wasActive = true;
         if (!running) break;
         if (child > 0) {
@@ -505,6 +619,10 @@ int main(int argc, char **argv) {
                 child = -1;
                 busy = false;
                 failed = done < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
+                if (updateChild) {
+                    ReadUpdateStatus();
+                    updateChild = false;
+                }
                 enabled = Enabled();
                 visuals = VisualsEnabled();
                 touch = TouchEnabled();

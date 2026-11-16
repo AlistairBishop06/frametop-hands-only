@@ -65,6 +65,23 @@ release before rerunning `./install.sh`.
 
 The installer also creates user-level services, installs the `framehands` command in `~/.local/bin/`, registers the FrameHands SteamVR driver and creates the dashboard application's OpenVR manifest. It creates `~/.config/framehands/config` only if that file does not already exist.
 
+### Dashboard updates
+
+Open FrameHands and press **Check for Updates**. The panel checks the latest
+published GitHub release. When a newer version is available, press its
+**Available** button to download and install it. The updater verifies the
+release checksum and runs the bundled installer; it never builds on the Frame.
+After a successful update, the panel displays **Restart Headset**. Restart
+normally when you are finished using VR so SteamVR loads any new driver.
+
+Setting capabilities on the updated camera broker requires `sudo`. The
+dashboard uses SteamVR's password-mode keyboard to ask for the `steamos`
+password when you press **Download**. FrameHands passes it through an anonymous
+pipe only to the installer's `sudo setcap` commands and does not put it in a
+file, environment variable, command line, or log. If the keyboard is unavailable
+or authentication fails, use Konsole:
+`cd ~/frametop-hands-only && git pull && ./install.sh`.
+
 > **Existing locally compiled binaries take precedence:** If the checkout contains all expected built binaries, `./install.sh` uses them instead of downloading GitHub Releases. Use a clean source-only checkout if you specifically want the published release binaries.
 
 ### 2. Add FrameHands to the Steam Frame **+ → Launch Application** menu
