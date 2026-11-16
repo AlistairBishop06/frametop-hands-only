@@ -76,6 +76,14 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(cli.main(["smoothness", "101"]), 1)
             self.assertEqual(cli.config()["HANDS_SMOOTHNESS"], "95")
 
+    def test_hand_colour_presets_persist_and_reject_unknown_values(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(cli, "CONFIG", Path(tmp)/"config"):
+            for name in ("red", "orange", "yellow", "green", "blue", "purple", "black", "white"):
+                self.assertEqual(cli.main(["colour", name]), 0)
+                self.assertEqual(cli.config()["HANDS_VIEW_COLOUR"], name)
+            self.assertEqual(cli.main(["colour", "ultraviolet"]), 1)
+            self.assertEqual(cli.config()["HANDS_VIEW_COLOUR"], "white")
+
     def test_touch_off_keeps_gesture_input_running(self):
         commands = []
         def fake_ctl(*args, **_kwargs):

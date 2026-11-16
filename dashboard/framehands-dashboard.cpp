@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <csignal>
@@ -21,7 +22,7 @@
 #include <unistd.h>
 
 namespace {
-constexpr int W = 640, H = 680;
+constexpr int W = 640, H = 790;
 struct RGB { uint8_t r, g, b; };
 struct Box {
     int x0, y0, x1, y1;
@@ -33,10 +34,15 @@ constexpr Box kVisuals{28, 232, 311, 345};
 constexpr Box kTouch{327, 232, 612, 345};
 constexpr Box kGamePause{28, 360, 612, 449};
 constexpr Box kSlider{49, 517, 591, 572};
-constexpr Box kUpdate{28, 592, 612, 660};
+constexpr Box kColour{28, 592, 612, 691};
+constexpr Box kUpdate{28, 704, 612, 775};
 constexpr int kSliderLeft = 50, kSliderRight = 590;
 std::vector<uint8_t> pixels(W * H * 4);
 std::string updateStatus = "CHECK FOR UPDATES";
+std::string handColour = "white";
+constexpr const char *kColourNames[] = {"red", "orange", "yellow", "green", "blue", "purple", "black", "white"};
+constexpr RGB kColourSwatches[] = {{230, 55, 55}, {246, 132, 37}, {247, 213, 42}, {56, 202, 91},
+                                   {62, 126, 238}, {167, 89, 220}, {16, 20, 27}, {244, 248, 253}};
 
 // Five-wide bitmap capitals keep this app entirely self-contained on ARM64.
 const uint8_t *Glyph(char c) {
@@ -202,6 +208,16 @@ int Smoothness() {
     }
     return std::clamp(level, 0, 100);
 }
+std::string HandColour() {
+    const char *home = std::getenv("HOME");
+    if (!home) return "white";
+    std::ifstream f(std::filesystem::path(home) / ".config/framehands/config");
+    std::string line, colour = "white";
+    while (std::getline(f, line)) if (line.rfind("HANDS_VIEW_COLOUR=", 0) == 0)
+        colour = line.substr(18);
+    for (const char *name : kColourNames) if (colour == name) return colour;
+    return "white";
+}
 void Paint(bool enabled, bool visuals, bool touch, bool gamePause, int smoothness, bool busy, bool failed) {
     const RGB ink{236, 245, 251}, muted{151, 174, 195}, teal{80, 219, 180};
     for (int y = 0; y < H; ++y)
@@ -284,14 +300,24 @@ void Paint(bool enabled, bool visuals, bool touch, bool gamePause, int smoothnes
     Circle(knob, 536, 5, {51, 166, 156});
     TextAt(50, 553, "LESS", 2, muted);
     TextAt(542, 553, "MORE", 2, muted);
+    RoundRect(kColour, 18, {23, 37, 55});
+    TextAt(50, 601, "HAND COLOUR", 2, ink);
+    for (int i = 0; i < 8; ++i) {
+        const int x = 71 + 68 * i;
+        if (handColour == kColourNames[i]) Circle(x, 645, 23, teal);
+        Circle(x, 645, 18, kColourSwatches[i]);
+        std::string label = kColourNames[i];
+        std::transform(label.begin(), label.end(), label.begin(), [](unsigned char c) { return std::toupper(c); });
+        TextAt(x - int(label.size()) * 3, 671, label, 1, muted);
+    }
     RoundRect(kUpdate, 18, {25, 56, 70});
-    TextAt(50, 605, "UPDATES", 2, ink);
+    TextAt(50, 717, "UPDATES", 2, ink);
     const std::string shownUpdate = updateStatus.rfind("AVAILABLE ", 0) == 0
         ? "DOWNLOAD " + updateStatus.substr(10) : updateStatus;
     const std::string label = shownUpdate.size() > 28 ? shownUpdate.substr(0, 28) : shownUpdate;
-    TextAt(50, 633, label, 2, updateStatus.rfind("ERROR", 0) == 0 ? RGB{255, 149, 132} : teal);
+    TextAt(50, 745, label, 2, updateStatus.rfind("ERROR", 0) == 0 ? RGB{255, 149, 132} : teal);
     if (updateStatus == "SUDO REQUIRED")
-        TextAt(300, 637, "USE KONSOLE FOR PASSWORD", 1, muted);
+        TextAt(300, 749, "USE KONSOLE FOR PASSWORD", 1, muted);
 }
 int SmoothnessAt(float x) {
     return std::clamp(int(std::lround((x - kSliderLeft) * 100.0f / (kSliderRight-kSliderLeft))), 0, 100);
@@ -376,6 +402,11 @@ int main(int argc, char **argv) {
     }
     vr::VROverlay()->SetOverlayWidthInMeters(mainOverlay, 1.8f);
     vr::VROverlay()->SetOverlayInputMethod(mainOverlay, vr::VROverlayInputMethod_Mouse);
+    const auto clickStabilization = vr::VROverlay()->SetOverlayFlag(
+        mainOverlay, vr::VROverlayFlags_EnableClickStabilization, true);
+    if (clickStabilization != vr::VROverlayError_None)
+        std::cerr << "framehands-dashboard: click stabilization unavailable: "
+                  << int(clickStabilization) << '\n';
     vr::HmdVector2_t mouseScale{}; mouseScale.v[0] = W; mouseScale.v[1] = H;
     vr::VROverlay()->SetOverlayMouseScale(mainOverlay, &mouseScale);
     // Match the panel's hand mark without an external image dependency.
@@ -400,6 +431,7 @@ int main(int argc, char **argv) {
     bool enabled = Enabled(), visuals = VisualsEnabled(), touch = TouchEnabled();
     bool gamePause = GamePauseEnabled(), pausedState = GamePaused(), busy = false, failed = false;
     int smoothness = Smoothness();
+    handColour = HandColour();
     bool sliding = false, updateChild = false, awaitingPassword = false;
     std::string updateVersion;
     pid_t child = -1;
@@ -513,6 +545,21 @@ int main(int argc, char **argv) {
                 if (kClose.Contains(x, y)) {
                     running = false;
                     break;
+                }
+                if (kColour.Contains(x, y)) {
+                    const int slot = std::clamp((int(x) - 37) / 68, 0, 7);
+                    if (y >= 622 && y < 690) {
+                        child = fork();
+                        if (child == 0) {
+                            const std::string cli = Cli().string();
+                            execl(cli.c_str(), cli.c_str(), "colour", kColourNames[slot], (char *)nullptr);
+                            _exit(127);
+                        }
+                        busy = child > 0; failed = child < 0;
+                        Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                        vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+                    }
+                    continue;
                 }
                 if (kUpdate.Contains(x, y)) {
                     const bool install = updateStatus.rfind("AVAILABLE ", 0) == 0;
@@ -629,6 +676,7 @@ int main(int argc, char **argv) {
                 gamePause = GamePauseEnabled();
                 pausedState = GamePaused();
                 smoothness = Smoothness();
+                handColour = HandColour();
                 Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
@@ -638,10 +686,13 @@ int main(int argc, char **argv) {
             const bool current = Enabled(), currentVisuals = VisualsEnabled(), currentTouch = TouchEnabled();
             const bool currentGamePause = GamePauseEnabled(), currentPaused = GamePaused();
             const int currentSmooth = Smoothness();
+            const std::string currentColour = HandColour();
             if (!sliding && (current != enabled || currentVisuals != visuals || currentTouch != touch ||
-                             currentGamePause != gamePause || currentPaused != pausedState || currentSmooth != smoothness)) {
+                             currentGamePause != gamePause || currentPaused != pausedState || currentSmooth != smoothness ||
+                             currentColour != handColour)) {
                 enabled = current; visuals = currentVisuals; touch = currentTouch;
                 gamePause = currentGamePause; pausedState = currentPaused; smoothness = currentSmooth;
+                handColour = currentColour;
                 Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }

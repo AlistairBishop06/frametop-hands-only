@@ -11,7 +11,7 @@ FrameHands is derived from [Frametop](https://github.com/DeeJanuz/frametop) and 
 ## Features
 
 - **Two-hand tracking:** Tracks 21 landmarks per hand and fits an articulated skeleton using the Frame's cameras.
-- **Visible hands in SteamVR:** Renders separate left and right hand overlays, with adjustable appearance.
+- **Visible hands in SteamVR:** Renders separate left and right hand overlays, with eight selectable colour presets.
 - **Smoother motion:** Adaptive filtering of hand positions, rotations and finger joints; interpolation and temporary pose holding help reduce jitter and sudden jumps.
 - **Pinch and grip recognition:** Detects index pinches, middle-finger pinches and grips. The index pinch defaults to a more forgiving **25 mm** activation threshold.
 - **Optional SteamVR dashboard input:** Aim a hand ray, pinch to click, hold to drag and use the supported middle-pinch actions. A physical controller takes precedence when appropriate.
@@ -118,6 +118,12 @@ After installation, **fully restart SteamVR** so its new input driver and app re
 ```
 
 Open the SteamVR dashboard, press **+**, choose **Launch Application**, and select **FrameHands**. Your panel should show the current tracking state.
+The panel requests SteamVR click stabilization for laser clicks, so slight ray
+movement during a pinch is less likely to shift the intended target. This
+applies to the FrameHands panel; it does not change other SteamVR overlays.
+Choose a swatch under **Hand Colour** to change both hand overlays. The choice
+is saved and takes effect while the renderer is running; white restores the
+original appearance. Black retains a light rim for visibility.
 
 ## Using the FrameHands control panel
 
@@ -217,7 +223,7 @@ Common settings:
 | --- | --- | --- |
 | `AUTO_START` | `1` | Start selected tracking services with SteamVR. |
 | `TRACKING` | `1` | Enable or disable hand tracking. |
-| `RENDER` | `1` | Display the white 3D hand overlays; the Hand Visuals control changes this live. |
+| `RENDER` | `1` | Display the 3D hand overlays; the Hand Visuals control changes this live. |
 | `GESTURE_INPUT` | `0` | Enable the virtual pointer for the SteamVR dashboard. |
 | `PAUSE_IN_GAMES` | `0` | Pause FrameHands services while SteamVR identifies a Steam game scene. |
 | `HANDS_TOUCH` | `0` | Enable fingertip contact on supported SteamVR overlays; also starts the virtual pointer. |
@@ -227,6 +233,7 @@ Common settings:
 | `HANDS_MODEL` | `latest` | Pinned fine-tuned model, with stock fallback; `stock` selects stock. |
 | `HANDS_VIEW_MODEL` | `asset` | Rendered hand model (`asset`, `babylon`, `mrtk3`, `godot`, `mrtk2`, `robot`, `capsules`). |
 | `HANDS_VIEW_STYLE` | `ghost` | Hand appearance (`ghost` or `solid`). |
+| `HANDS_VIEW_COLOUR` | `white` | Dashboard hand colour: `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `black`, or `white`. Changes appear without restarting tracking. |
 | `PERFORMANCE` | `balanced` | `balanced`, `quality` or reduced-power `power`. |
 | `DEBUG` | `0` | More frequent logs and gesture diagnostics when set to `1`. |
 

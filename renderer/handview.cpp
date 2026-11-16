@@ -900,8 +900,34 @@ constexpr int kCapsules = -1, kRobot = -2;   // Look::model's that aren't handas
 struct Look {
     int model = 0;              // the 3D model (handasset::kModel's), or kCapsules, kRobot
     const Style *style = &kStyles[0];
+    std::string colour = "white";
     bool inRoom = true;         // draw with Room View on too
 };
+
+struct ColourPreset { const char *name; float rgb[3]; };
+constexpr ColourPreset kColours[] = {
+    {"red", {0.95f, 0.18f, 0.20f}}, {"orange", {1.0f, 0.48f, 0.12f}},
+    {"yellow", {1.0f, 0.84f, 0.12f}}, {"green", {0.20f, 0.82f, 0.33f}},
+    {"blue", {0.20f, 0.48f, 1.0f}}, {"purple", {0.66f, 0.33f, 0.92f}},
+    {"black", {0.055f, 0.065f, 0.085f}}, {"white", {1.0f, 1.0f, 1.0f}}
+};
+const ColourPreset *FindColour(const std::string &name) {
+    for (const auto &preset : kColours) if (name == preset.name) return &preset;
+    return nullptr;
+}
+Style Tinted(const Style &source, const std::string &name) {
+    Style out = source;
+    if (name == "white") return out; // preserve the original materials exactly
+    const ColourPreset *preset = FindColour(name);
+    if (!preset) return out;
+    for (int i = 0; i < 3; ++i) {
+        out.base[i] = preset->rgb[i] * (name == "black" ? 1.0f : 0.88f);
+        out.shell[i] = preset->rgb[i];
+        out.glow[i] = name == "black" ? 0.55f : 0.42f + 0.58f * preset->rgb[i];
+        out.accent[i] = name == "black" ? 0.65f : 0.25f + 0.75f * preset->rgb[i];
+    }
+    return out;
+}
 
 // A model's name (HANDS_VIEW_MODEL, the model command): one of handasset's, robot or capsules.
 bool ParseModel(const char *name, int &model) {
@@ -922,12 +948,14 @@ const char *ModelName(int model) { return model == kRobot ? "robot" : model < 0 
 Look ReadLook(std::string &log) {
     Look k;
     const std::string m = handcut::Setting("HANDS_VIEW_MODEL", "asset"), st = handcut::Setting("HANDS_VIEW_STYLE", "ghost"),
-                      r = handcut::Setting("HANDS_VIEW_ROOMVIEW", "1");
+                      r = handcut::Setting("HANDS_VIEW_ROOMVIEW", "1"), colour = handcut::Setting("HANDS_VIEW_COLOUR", "white");
     if (!ParseModel(m.c_str(), k.model)) log += "HANDS_VIEW_MODEL=" + m + " (ignored: " + ModelNames() + ") ";
     if (const Style *f = FindStyle(st.c_str())) k.style = f;
     else log += "HANDS_VIEW_STYLE=" + st + " (ignored: ghost|solid) ";
     if (r == "0" || r == "1") k.inRoom = r == "1";
     else log += "HANDS_VIEW_ROOMVIEW=" + r + " (ignored: 1|0) ";
+    if (FindColour(colour)) k.colour = colour;
+    else log += "HANDS_VIEW_COLOUR=" + colour + " (ignored) ";
     return k;
 }
 
@@ -1022,12 +1050,13 @@ Style Flashed(const Style &st, float f) {
 
 void Render(Gpu &gpu, Output &o, const Look &look, const handcut::Hand &h, const handmesh::Mesh &mesh,
             const handskin::Bones &bones, const handrobot::Bones &robot, const handmesh::Quad &q, const double eyes[2][3]) {
-    if (look.model == kRobot) return gpu.DrawRobot(o, robot, q, eyes, *look.style);
+    const Style coloured = Tinted(*look.style, look.colour);
+    if (look.model == kRobot) return gpu.DrawRobot(o, robot, q, eyes, coloured);
     float tips[15];
     for (int f = 0; f < 5; ++f)
         for (int i = 0; i < 3; ++i) tips[3 * f + i] = h.p[4 + 4 * f][i];
-    if (look.model >= 0) gpu.DrawModel(o, h.right, bones, q, eyes, tips, CutOf(mesh, bones), *look.style);
-    else gpu.Draw(o, mesh, q, eyes, tips, *look.style);
+    if (look.model >= 0) gpu.DrawModel(o, h.right, bones, q, eyes, tips, CutOf(mesh, bones), coloured);
+    else gpu.Draw(o, mesh, q, eyes, tips, coloured);
 }
 
 // --snapshot: demo poses of both hands drawn offscreen into a PNG, then the cost of drawing.
@@ -1211,6 +1240,11 @@ int main(int argc, char **argv) {
         const int64_t now = MonoNs();
         if (now >= nextSmoothSettings) {
             nextSmoothSettings = now + 750'000'000ll;
+            const std::string colour = handcut::Setting("HANDS_VIEW_COLOUR", "white");
+            if (FindColour(colour) && colour != look.colour) {
+                look.colour = colour;
+                for (Side &s : sides) s.lastFrame = ~uint64_t(0);
+            }
             const int level = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
             holdK.blendMinMs = 5.0 + 0.22 * level;
             holdK.blendMaxMs = 35.0 + 1.3 * level;
@@ -1370,9 +1404,10 @@ int main(int argc, char **argv) {
             int pick = 0;
             while (pick == s.shown || pick == s.before) ++pick;
             if (flash > 0) {
-                const Style st = Flashed(*look.style, flash);
+                const Style st = Flashed(Tinted(*look.style, look.colour), flash);
                 Look lit = look;
                 lit.style = &st;
+                lit.colour = "white"; // already tinted before the cyan flash
                 Render(gpu, s.out[pick], lit, *h, mesh, bones, robot, q, eyes);
             } else {
                 Render(gpu, s.out[pick], look, *h, mesh, bones, robot, q, eyes);
