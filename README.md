@@ -303,6 +303,13 @@ The hand pointer stops with tracking. Re-enable through a physical controller or
 
 Verify `GESTURE_INPUT=1`, apply `framehands sync`, and check that the SteamVR driver was loaded after restarting SteamVR. The hand must be tracked and the normal SteamVR dashboard must be open. Use these diagnostics:
 
+The pointer accepts a hand immediately with stereo tracking, or after 250 ms
+of continuous single-camera tracking. Single-camera depth is less precise, so
+Direct Touch still requires stereo tracking. When the dashboard opens or the
+virtual controller first connects, FrameHands waits briefly before asking
+SteamVR to select its laser. A side-button press can open or refocus the
+dashboard; it cannot repair missing hand tracking.
+
 ```bash
 ~/.local/bin/framehands status
 ~/.local/bin/framehands gestures

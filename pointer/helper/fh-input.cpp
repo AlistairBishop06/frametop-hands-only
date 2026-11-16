@@ -97,9 +97,9 @@ bool PhysicalControllerBusy(const vr::TrackedDevicePose_t *poses, const handcut:
         if (role != (hand.right ? vr::TrackedControllerRole_RightHand : vr::TrackedControllerRole_LeftHand)) continue;
         if (!poses[i].bPoseIsValid || poses[i].eTrackingResult != vr::TrackingResult_Running_OK) continue;
         V pos = Position(poses[i].mDeviceToAbsoluteTracking);
-        if (Length(pos-palm) < 0.15) state[i].busyUntil = now + 3'000'000'000ll;
+        if (Length(pos-palm) < 0.15) state[i].busyUntil = now + 700'000'000ll;
         if (state[i].at && now-state[i].at < 250'000'000ll && Length(pos-state[i].last) > 0.025)
-            state[i].busyUntil = now + 3'000'000'000ll;
+            state[i].busyUntil = now + 700'000'000ll;
         state[i].last = pos; state[i].at = now;
         if (now < state[i].busyUntil) return true;
     }
@@ -198,9 +198,9 @@ int main() {
     int64_t touchReleaseAt = 0;
     int64_t nextTouchReport = 0;
     int owner = -1;
-    bool showing = false, pressed = false, initialized[2]{};
+    bool showing = false, pressed = false, initialized[2]{}, wasDashboard = false;
     uint32_t begins[2]{};
-    int64_t pressAt = 0, pending[2]{};
+    int64_t pressAt = 0, pending[2]{}, seenSince[2]{}, claimAt = 0, claimedAt = 0;
     while (vr::VRSystem()->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd)) {
         const int64_t now = NowNs();
         if (touchOn && now >= nextOverlayScan) {
@@ -227,6 +227,8 @@ int main() {
         vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0,
                                                         poses, vr::k_unMaxTrackedDeviceCount);
         const bool dashboard = vr::VROverlay()->IsDashboardVisible();
+        if (dashboard && !wasDashboard && showing) claimAt = now + 180'000'000ll;
+        wasDashboard = dashboard;
         const bool fresh = poses[0].bPoseIsValid && hands.Update(poses[0].mDeviceToAbsoluteTracking, now);
         const handcut::Hand *side[2]{};
         if (fresh) for (const auto &h : hands.shown()) side[h.right ? 1 : 0] = &h;
@@ -234,7 +236,12 @@ int main() {
         for (int s = 0; s < 2; ++s) {
             const auto &g = hands.pinch(s);
             if (!initialized[s]) begins[s] = g.begins, initialized[s] = true;
-            if ((dashboard || floatPointer) && side[s] && side[s]->stereo && !hands.grip(s).down) {
+            if (!side[s]) seenSince[s] = 0;
+            else if (!seenSince[s]) seenSince[s] = now;
+            // Stereo depth is best, but a stable one-camera hand is sufficient
+            // for a dashboard ray. Direct Touch still uses its own contact test.
+            const bool located = side[s] && (side[s]->stereo || now - seenSince[s] >= 250'000'000ll);
+            if ((dashboard || floatPointer) && located && !hands.grip(s).down) {
                 const auto &headPose = poses[0].mDeviceToAbsoluteTracking;
                 const V knuckle = (Point(side[s]->p[5])+Point(side[s]->p[9]))*0.5;
                 const V fromHead = knuckle-Position(headPose);
@@ -264,6 +271,7 @@ int main() {
             aim.Reset();  // never interpolate a ray between different hands
             if (pressed) Send(fd, "btn trigger 0"), pressed = touchPressed = false;
             if (showing) Send(fd, "hide"), showing = false;
+            claimAt = claimedAt = 0;
             owner = pick;
         }
         if (owner >= 0) {
@@ -413,6 +421,9 @@ int main() {
                         probe(target, key[0] ? key : "observed overlay");
                     }
                 }
+                // Mono depth can be several centimetres wrong; keep the ray,
+                // but require stereo for physical contact with an overlay.
+                if (!h.stereo) touching = false;
                 if (touchOn && touchDebug && now >= nextTouchReport) {
                     nextTouchReport = now + 1'000'000'000ll;
                     std::fprintf(stderr,
@@ -439,7 +450,14 @@ int main() {
                 if (!showing) {
                     Send(fd, owner ? "role right" : "role left");
                     showing = Send(fd, "show");
-                    if (showing) Send(fd, "btn a 1"), Send(fd, "btn a 0"); // claim the dashboard laser
+                    // Let SteamVR connect the pose and assign its input path
+                    // before asking the compositor to use this laser.
+                    if (showing) claimAt = now + 180'000'000ll;
+                }
+                if (showing && claimAt && now >= claimAt) {
+                    Send(fd, "btn a 1"); Send(fd, "btn a 0");
+                    claimAt = 0;
+                    claimedAt = now;
                 }
                 if (showing && !pressed && touchOn && touching && now >= touchReleaseAt) {
                     Send(fd, "btn trigger 1"); pressed = touchPressed = true; pressAt = now;
@@ -452,7 +470,9 @@ int main() {
                         aim.Reset();
                     }
                 }
-                if (showing && !pressed && pending[owner] && now-pending[owner] < 200'000'000ll) {
+                if (showing && !pressed && !claimAt && claimedAt &&
+                    now - claimedAt >= 60'000'000ll && pending[owner] &&
+                    now-pending[owner] < 600'000'000ll) {
                     Send(fd, "btn trigger 1"); pressed = true; pressAt = now; pending[owner] = 0;
                 }
                 if (pressed && !touchPressed && (!g.down || now-g.beginNs > 4'000'000'000ll) && now-pressAt > 50'000'000ll)
