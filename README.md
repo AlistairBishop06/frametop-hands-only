@@ -341,6 +341,9 @@ dashboard; it cannot repair missing hand tracking.
 ```
 
 If the pointer is jittery, leave `HANDS_POINTER_SMOOTH=1`. If deliberate clicks are missed, adjust `HANDS_PINCH_BEGIN` in small increments and test again.
+FrameHands also holds the last displayed hand ray through a pinch click for up
+to 120 ms, then resumes live aiming for a drag. This applies wherever the
+FrameHands virtual pointer is accepted; Direct Touch uses its contact ray.
 
 ### Installer, camera or library errors
 

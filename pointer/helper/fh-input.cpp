@@ -201,6 +201,12 @@ int main() {
     bool showing = false, pressed = false, initialized[2]{}, wasDashboard = false;
     uint32_t begins[2]{};
     int64_t pressAt = 0, pending[2]{}, seenSince[2]{}, claimAt = 0, claimedAt = 0;
+    // Hold the last displayed ray through the pinch click, then let a drag
+    // follow the hand. This is independent of the target overlay's flags.
+    V sentOrigin{}, sentDirection{}, heldOrigin{}, heldDirection{};
+    int64_t sentAt = 0;
+    int heldOwner = -1;
+    constexpr int64_t kClickHoldNs = 120'000'000ll;
     while (vr::VRSystem()->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd)) {
         const int64_t now = NowNs();
         if (touchOn && now >= nextOverlayScan) {
@@ -264,14 +270,26 @@ int main() {
             const auto &g = hands.pinch(s);
             if (g.begins != begins[s]) {
                 begins[s] = g.begins;
-                if (ready[s] && !pressed) pick = s, pending[s] = now;
+                if (ready[s] && !pressed) {
+                    pick = s;
+                    pending[s] = now;
+                    if (s == owner && sentAt && now - sentAt < 100'000'000ll) {
+                        heldOrigin = sentOrigin;
+                        heldDirection = sentDirection;
+                        heldOwner = s;
+                    }
+                }
             }
         }
         if (pick != owner || pick < 0) {
+            if (owner >= 0 && owner != pick) pending[owner] = 0;
+            if (pick < 0) pending[0] = pending[1] = 0;
             aim.Reset();  // never interpolate a ray between different hands
             if (pressed) Send(fd, "btn trigger 0"), pressed = touchPressed = false;
             if (showing) Send(fd, "hide"), showing = false;
             claimAt = claimedAt = 0;
+            heldOwner = -1;
+            sentAt = 0;
             owner = pick;
         }
         if (owner >= 0) {
@@ -437,16 +455,31 @@ int main() {
                 // Use the same ray for the virtual controller that detected
                 // contact, so its laser and click land on the tested overlay.
                 const bool touchAim = touchOn && (touching || touchPressed) && tipRange > 0.12;
+                if (touchAim) heldOwner = -1; // contact placement always wins
                 const V aimOrigin = touchAim ? contactOrigin : origin;
                 const V aimDir = touchAim ? contactDir : dir;
                 if (touchAim) aim.Reset(); // contact must follow the fingertip exactly
                 else if (smoothPointer) aim.Step(aimOrigin, aimDir, now, smoothness);
-                const V p = smoothPointer && !touchAim ? aim.origin : aimOrigin;
-                const V d = smoothPointer && !touchAim ? aim.direction : aimDir;
+                const V liveOrigin = smoothPointer && !touchAim ? aim.origin : aimOrigin;
+                const V liveDirection = smoothPointer && !touchAim ? aim.direction : aimDir;
+                if (pending[owner] && now - pending[owner] >= 600'000'000ll) {
+                    pending[owner] = 0;
+                    if (!pressed) heldOwner = -1;
+                }
+                if (pending[owner] && heldOwner != owner && !touchAim) {
+                    heldOrigin = liveOrigin;
+                    heldDirection = liveDirection;
+                    heldOwner = owner;
+                }
+                const bool holdClick = !touchAim && heldOwner == owner &&
+                    (pending[owner] || (pressed && !touchPressed && now - pressAt < kClickHoldNs));
+                const V p = holdClick ? heldOrigin : liveOrigin;
+                const V d = holdClick ? heldDirection : liveDirection;
                 char pose[160];
                 std::snprintf(pose, sizeof pose, "pose %.5f %.5f %.5f %.3f %.3f", p.x, p.y, p.z,
                               std::atan2(-d.x,-d.z)*180/M_PI, std::asin(std::clamp(d.y,-1.0,1.0))*180/M_PI);
                 Send(fd, pose);
+                sentOrigin = p; sentDirection = d; sentAt = now;
                 if (!showing) {
                     Send(fd, owner ? "role right" : "role left");
                     showing = Send(fd, "show");
@@ -476,7 +509,7 @@ int main() {
                     Send(fd, "btn trigger 1"); pressed = true; pressAt = now; pending[owner] = 0;
                 }
                 if (pressed && !touchPressed && (!g.down || now-g.beginNs > 4'000'000'000ll) && now-pressAt > 50'000'000ll)
-                    Send(fd, "btn trigger 0"), pressed = false;
+                    Send(fd, "btn trigger 0"), pressed = false, heldOwner = -1;
             }
         }
         vr::VREvent_t event;
