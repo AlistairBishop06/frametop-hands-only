@@ -2,6 +2,8 @@
 
 **Camera-based hand tracking, hand overlays and pinch interaction for the Steam Frame.**
 
+https://github.com/user-attachments/assets/c54dd16b-259a-4c39-ab1a-a1fc931f3f94
+
 FrameHands uses the Steam Frame's built-in tracking cameras to track both hands, render posed 3D hands in SteamVR and optionally provide a hand-controlled pointer for the SteamVR dashboard. A small **FrameHands** control panel lets you turn tracking on or off without restarting the headset. Tracking continues after you close the panel.
 
 FrameHands is derived from [Frametop](https://github.com/DeeJanuz/frametop) and runs independently of Frametop Desktop, KDE, Distrobox and Podman. It uses SteamVR's existing runtime and does not replace its normal dashboard.
