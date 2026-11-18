@@ -110,7 +110,7 @@ stage=$HOME/.local/share/framehands/app.new.$$
 mkdir -p "$HOME/.local/share/framehands"
 [[ ! -e $stage && ! -L $stage ]] || fail 'temporary install path already exists'
 mkdir -m 700 "$stage"
-mkdir -p "$stage/hands/build" "$stage/hands/camd" "$stage/renderer/build" "$stage/renderer/assets" "$stage/pointer/build" "$stage/pointer/driver/fh_pointer/bin/linuxarm64" "$stage/config" "$stage/services" "$stage/licenses" "$stage/dashboard/build" "$stage/scripts"
+mkdir -p "$stage/hands/build" "$stage/hands/camd" "$stage/renderer/build" "$stage/renderer/assets" "$stage/pointer/build" "$stage/pointer/driver/fh_pointer/bin/linuxarm64" "$stage/config" "$stage/services" "$stage/licenses" "$stage/dashboard/build" "$stage/dashboard/assets" "$stage/scripts"
 cp -a "$source_dir/hands/build/fh-camd" "$source_dir/hands/build/fh-hands" "$stage/hands/build/"
 cp -a "$source_dir/hands/camd/LICENSE.FrameEyeCameraFeed" "$stage/hands/camd/"
 if [[ -f $source_dir/licenses/jsoncpp-LICENSE ]]; then
@@ -122,6 +122,7 @@ fi
 cp -a "$source_dir/hands/models" "$stage/hands/"
 cp -a "$source_dir/renderer/build/framehands-view" "$stage/renderer/build/"
 cp -a "$source_dir/dashboard/build/framehands-dashboard" "$stage/dashboard/build/"
+cp -a "$source_dir/dashboard/assets/InterVariable.ttf" "$source_dir/dashboard/assets/Inter-LICENSE.txt" "$stage/dashboard/assets/"
 cp -a "$source_dir/renderer/assets/hands" "$stage/renderer/assets/"
 cp -a "$source_dir/pointer/build/fh-input" "$stage/pointer/build/"
 cp -a "$source_dir/pointer/driver/fh_pointer/". "$stage/pointer/driver/fh_pointer/"
