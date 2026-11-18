@@ -3,12 +3,12 @@
 #   make check    builds and runs the C++ unit tests (tests/sides_test.cpp, tests/skeleton_test.cpp,
 #                 tests/pinch_test.cpp, tests/flagbuf_test.cpp)
 # The first build fetches ncnn's source (release NCNN_TAG, commit e54f7b1f88434e1d844ea0551b880a1cfb079ce1)
-# and builds it into build/ncnn, which takes a few minutes. The download is the release's
+# and builds it into build/ncnn-serial, which takes a few minutes. The download is the release's
 # full-source zip, checked by NCNN_SHA256 (the digest GitHub lists for that asset). NCNN=DIR
 # uses an ncnn install already built instead.
 NCNN_TAG  = 20260526
 NCNN_SHA256 = 754659d6fe65545cf2ef4483ffb84526fea631f8764c44b150f1601d0fb4004b
-NCNN     ?= build/ncnn/install
+NCNN     ?= build/ncnn-serial/install
 
 # JsonCpp 1.9.6, pinned to the source archive and digest used by protobuf.
 # Ubuntu's libjsoncpp-dev has headers but no static libjsoncpp.a on ARM64.
@@ -56,29 +56,35 @@ build/shm-test: tests/shm_test.cpp include/fh_shm.hpp
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) -o $@ tests/shm_test.cpp
 
+build/frame-pair-test: tests/frame_pair_test.cpp track/frame_pair.h
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) -o $@ tests/frame_pair_test.cpp
+
 build/xrcams-test: tests/xrcams_test.c camd/xrcams.c camd/xrcams.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -o $@ tests/xrcams_test.c
 
-check: build/sides-test build/skeleton-test build/pinch-test build/flagbuf-test build/shm-test build/xrcams-test
+check: build/sides-test build/skeleton-test build/pinch-test build/flagbuf-test build/shm-test build/xrcams-test build/frame-pair-test
 	build/sides-test
 	build/skeleton-test
 	build/pinch-test
 	build/flagbuf-test
 	build/shm-test
 	build/xrcams-test
+	build/frame-pair-test
 
-# ncnn as frame-hands built it (the models were converted and quantized for it), minus its tools
-build/ncnn/install/lib/libncnn.a:
-	rm -rf build/ncnn && mkdir -p build/ncnn
-	curl -fsSL -o build/ncnn/src.zip https://github.com/Tencent/ncnn/releases/download/$(NCNN_TAG)/ncnn-$(NCNN_TAG)-full-source.zip
-	echo "$(NCNN_SHA256)  build/ncnn/src.zip" | sha256sum -c --quiet
-	unzip -q build/ncnn/src.zip -d build/ncnn/src && rm build/ncnn/src.zip
-	cmake -S build/ncnn/src -B build/ncnn/build -G Ninja -Wno-dev -DCMAKE_BUILD_TYPE=Release \
-	  -DCMAKE_INSTALL_PREFIX=$(CURDIR)/build/ncnn/install -DCMAKE_INSTALL_LIBDIR=lib -DNCNN_VULKAN=OFF \
-	  -DNCNN_OPENMP=ON -DNCNN_INT8=ON -DNCNN_SIMPLEOCV=ON -DNCNN_BUILD_TOOLS=OFF -DNCNN_BUILD_EXAMPLES=OFF \
-	  -DNCNN_BUILD_BENCHMARK=OFF -DNCNN_BUILD_TESTS=OFF -DNCNN_PYTHON=OFF > build/ncnn/cmake.log
-	cmake --build build/ncnn/build --target install > build/ncnn/build.log
+# Each extractor already runs on one worker. Build serial kernels so every
+# layer avoids OpenMP dispatch. Keep OpenMP linking for NCNN= overrides.
+build/ncnn-serial/install/lib/libncnn.a:
+	rm -rf build/ncnn-serial && mkdir -p build/ncnn-serial
+	curl -fsSL -o build/ncnn-serial/src.zip https://github.com/Tencent/ncnn/releases/download/$(NCNN_TAG)/ncnn-$(NCNN_TAG)-full-source.zip
+	echo "$(NCNN_SHA256)  build/ncnn-serial/src.zip" | sha256sum -c --quiet
+	unzip -q build/ncnn-serial/src.zip -d build/ncnn-serial/src && rm build/ncnn-serial/src.zip
+	cmake -S build/ncnn-serial/src -B build/ncnn-serial/build -G Ninja -Wno-dev -DCMAKE_BUILD_TYPE=Release \
+	  -DCMAKE_INSTALL_PREFIX="$(CURDIR)/build/ncnn-serial/install" -DCMAKE_INSTALL_LIBDIR=lib -DNCNN_VULKAN=OFF \
+	  -DNCNN_OPENMP=OFF -DNCNN_INT8=ON -DNCNN_SIMPLEOCV=ON -DNCNN_BUILD_TOOLS=OFF -DNCNN_BUILD_EXAMPLES=OFF \
+	  -DNCNN_BUILD_BENCHMARK=OFF -DNCNN_BUILD_TESTS=OFF -DNCNN_PYTHON=OFF > build/ncnn-serial/cmake.log
+	cmake --build build/ncnn-serial/build --target install > build/ncnn-serial/build.log
 
 # Use one known static JsonCpp build, independent of distro dev packages.
 build/jsoncpp/install/lib/libjsoncpp.a:
@@ -93,6 +99,6 @@ build/jsoncpp/install/lib/libjsoncpp.a:
 	cmake --build build/jsoncpp/build --target install
 
 clean:
-	rm -f build/fh-camd build/fh-hands build/sides-test build/skeleton-test build/pinch-test build/flagbuf-test build/shm-test build/xrcams-test
+	rm -f build/fh-camd build/fh-hands build/sides-test build/skeleton-test build/pinch-test build/flagbuf-test build/shm-test build/xrcams-test build/frame-pair-test
 
 .PHONY: all check clean

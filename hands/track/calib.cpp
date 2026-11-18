@@ -70,7 +70,9 @@ V3 Camera::unproject(V2 uv) const {
     for (int i = 0; i < 8; ++i) {  // Newton on theta_d(t) = td
         const double t2 = t * t;
         const double df = 1 + t2 * (3 * k[0] + t2 * (5 * k[1] + t2 * (7 * k[2] + t2 * 9 * k[3])));
-        t = std::clamp(t - (theta_d(*this, t) - td) / df, 0.0, M_PI);
+        const double next = std::clamp(t - (theta_d(*this, t) - td) / df, 0.0, M_PI);
+        if (next == t) break; // further iterations would produce the same ray
+        t = next;
     }
     const double s = td > 1e-12 ? std::sin(t) / td : 1;
     return {mx * s, my * s, std::cos(t)};

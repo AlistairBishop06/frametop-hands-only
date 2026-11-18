@@ -59,8 +59,12 @@ bool Ring::read(int i, uint64_t n, std::vector<uint8_t> &out, fh_ring_slot_t *me
     if (seq != 2 * n + 2) return false;
     std::memcpy(meta, slot, sizeof *meta);
     out.resize(size_t(c.width) * c.height);
-    for (uint32_t y = 0; y < c.height; ++y)
-        std::memcpy(out.data() + size_t(y) * c.width, slot + sizeof(fh_ring_slot_t) + size_t(y) * c.stride, c.width);
+    const uint8_t *pixels = slot + sizeof(fh_ring_slot_t);
+    if (c.stride == c.width)
+        std::memcpy(out.data(), pixels, out.size());
+    else
+        for (uint32_t y = 0; y < c.height; ++y)
+            std::memcpy(out.data() + size_t(y) * c.width, pixels + size_t(y) * c.stride, c.width);
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     return __atomic_load_n(&s->seq, __ATOMIC_RELAXED) == seq;
 }
