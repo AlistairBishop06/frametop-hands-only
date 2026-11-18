@@ -1,0 +1,148 @@
+FrameHands development and stable release guide
+===============================================
+
+Run Git commands on your PC, in the frametop-hands-only repository. Run Frame
+commands in Konsole on the headset as the steamos user. The current setup has
+main for stable code and dev for work being tested. Stable releases use tags
+like v0.2.3. Development prereleases use tags like v0.2.3-dev.1.
+
+Before switching branches, run "git status --short". Commit or stash work you
+want to keep. The examples below use v0.2.3 as the next stable version after
+v0.2.2. Use the next unused version and dev number when making later releases.
+
+1. Switch source branches on your PC
+------------------------------------
+
+To work on development code:
+
+    git switch dev
+    git pull --ff-only origin dev
+
+To work on the last stable code:
+
+    git switch main
+    git pull --ff-only origin main
+
+Switching branches changes your PC checkout. It does not install anything on
+the Frame. A release tag keeps the exact source used for each published build.
+
+2. Publish another development build
+------------------------------------
+
+On your PC, commit the changes on dev, push that branch, then tag that commit:
+
+    git switch dev
+    git status --short
+    git add -A
+    git commit -m "Describe the change"
+    git push origin dev
+    git tag v0.2.3-dev.2
+    git push origin v0.2.3-dev.2
+
+The current first development tag is v0.2.3-dev.1, so the next example uses
+dev.2. For later builds, increase the final number. A new stable release must
+have a version at least as high as its development builds. Once v0.2.3 is
+stable, start development of v0.2.4 with v0.2.4-dev.1.
+
+Pushing the tag runs the GitHub "ARM64 release" workflow. Wait for it to pass.
+It creates a draft release. Open the repository's Releases page, check that
+framehands-aarch64.tar.gz and SHA256SUMS are attached, confirm that it is
+marked Pre-release, then publish it. Only published releases appear in the
+headset update check. Releases in this public repository are visible to the
+public, including development prereleases.
+
+3. Install a development or stable build on the Frame
+----------------------------------------------------
+
+Open the FrameHands dashboard on the headset. Under Updates, choose Dev or
+Stable, then press Check for Updates. If a build is offered, press Download,
+enter the steamos password when prompted, and let installation finish. Restart
+the headset normally when you are ready to load updated SteamVR components.
+
+Stable checks published stable releases. Dev checks published prereleases and
+stable releases and offers the newest version. Choosing Stable after installing
+a dev build offers the latest stable build even when its version is lower. The
+selected channel is saved in ~/.config/framehands/config.
+
+The installed build replaces the previous FrameHands app. Settings in
+~/.config/framehands/config are retained across normal installs.
+
+4. Return the headset to the last stable release
+------------------------------------------------
+
+On the Frame, choose Stable in the FrameHands dashboard, press Check for
+Updates, then Download. This installs the latest published stable release.
+
+If the development dashboard will not open, use Konsole on the Frame. This
+downloads the latest stable release directly, without copying files from a PC:
+
+    mkdir -p ~/framehands-rollback
+    cd ~/framehands-rollback
+    curl -fL https://github.com/AlistairBishop06/frametop-hands-only/releases/latest/download/framehands-aarch64.tar.gz -o framehands-aarch64.tar.gz
+    curl -fL https://github.com/AlistairBishop06/frametop-hands-only/releases/latest/download/SHA256SUMS -o SHA256SUMS
+    sha256sum -c SHA256SUMS
+    mkdir -p app
+    tar -xzf framehands-aarch64.tar.gz -C app
+    cd app
+    ./install.sh
+    ~/.local/bin/framehands update-channel stable
+
+Run ./install.sh without sudo. It requests sudo only to set capabilities on
+FrameHands' own camera broker. The last command prevents a later update check
+from offering the same development build again. Restart SteamVR normally when
+you are ready.
+
+5. Undo a bad development commit
+--------------------------------
+
+Find the commit on your PC:
+
+    git switch dev
+    git log --oneline -10
+
+Create a new commit that undoes the bad one, then publish a higher dev tag:
+
+    git revert <bad-commit-hash>
+    git push origin dev
+    git tag v0.2.3-dev.3
+    git push origin v0.2.3-dev.3
+
+Adjust dev.3 to the next unused dev number. When the workflow passes, publish
+its draft as a Pre-release. The headset's Dev update check then offers the
+corrected build. If you only want the headset back on stable, use section 4.
+Reverting keeps the shared Git history intact. Removing a published dev
+release does not roll back copies already installed on headsets.
+
+6. Promote tested code to a stable release
+------------------------------------------
+
+On your PC, merge dev into main and make a stable tag:
+
+    git switch main
+    git pull --ff-only origin main
+    git merge --no-ff dev
+    git push origin main
+    git tag v0.2.3
+    git push origin v0.2.3
+
+When the ARM64 workflow passes, inspect its draft release and publish it as a
+regular release, with Pre-release unchecked. Stable channel users can then
+install it from the dashboard. Do not reuse or move an existing release tag.
+
+To start the next development cycle from the newly released main branch:
+
+    git switch dev
+    git merge main
+    git push origin dev
+
+The next development tag can then be v0.2.4-dev.1. Resolve any merge conflicts
+before pushing.
+
+Before a public stable release, verify the build and hand interaction on a
+Frame, plus install and uninstall idempotence. The offline CI tests cannot
+confirm tracking latency or accuracy on the headset.
+
+If a stable release needs undoing after publication, revert the offending
+commit on main and publish the correction with a new, higher stable tag, such
+as v0.2.4. Use the same tag/build/release process above. Avoid force-pushing
+main or moving a tag that others may have installed.
