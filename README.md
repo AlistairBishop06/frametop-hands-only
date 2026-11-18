@@ -67,9 +67,12 @@ The installer also creates user-level services, installs the `framehands` comman
 
 ### Dashboard updates
 
-Open FrameHands and press **Check for Updates**. The panel checks the latest
-published GitHub release. When a newer version is available, press its
-**Available** button to download and install it. The updater verifies the
+Open FrameHands and choose **Stable** or **Dev** under Updates, then press
+**Check for Updates**. Stable is the default and ignores prereleases. Dev
+includes published prereleases tagged `vMAJOR.MINOR.PATCH-dev.NUMBER`, as well
+as stable releases. Selecting Stable after installing a dev build offers the
+latest stable build even if its version number is lower. When a release is
+available, press **Download** to install it. The updater verifies the
 release checksum and runs the bundled installer; it never builds on the Frame.
 After a successful update, the panel displays **Restart Headset**. Restart
 normally when you are finished using VR so SteamVR loads any new driver.
@@ -81,6 +84,17 @@ pipe only to the installer's `sudo setcap` commands and does not put it in a
 file, environment variable, command line, or log. If the keyboard is unavailable
 or authentication fails, use Konsole:
 `cd ~/frametop-hands-only && git pull && ./install.sh`.
+
+To test a dev build, first publish and install one stable release containing
+this channel selector. Then commit your changes, create and push a tag such as
+`v0.2.0-dev.1`, and wait for the ARM64 release workflow to finish. It creates
+a **draft** release. On GitHub, confirm the two assets are attached, keep the
+**Pre-release** option selected, and publish it. On the Frame choose **Dev**,
+press **Check for Updates**, then **Download**. To return to the public stable
+build, choose **Stable**, check again and download. Dev releases in this public
+repository are publicly accessible; the channel only keeps them out of normal
+stable update checks. Restart the headset normally when prompted, at a time
+when you are finished using VR.
 
 > **Existing locally compiled binaries take precedence:** If the checkout contains all expected built binaries, `./install.sh` uses them instead of downloading GitHub Releases. Use a clean source-only checkout if you specifically want the published release binaries.
 
@@ -371,7 +385,7 @@ git tag v0.1.6
 git push origin v0.1.6
 ```
 
-**Replace `v0.1.6` with your next unused version tag.** Pushing a tag beginning with `v` triggers `.github/workflows/release.yml` and creates a **draft** release on successful completion. Visit [GitHub Releases](https://github.com/AlistairBishop06/frametop-hands-only/releases), check that the two assets are attached, and click **Publish release**.
+**Replace `v0.1.6` with your next unused version tag.** Pushing a tag beginning with `v` triggers `.github/workflows/release.yml` and creates a **draft** release on successful completion. Stable tags use `vMAJOR.MINOR.PATCH`; dev tags use `vMAJOR.MINOR.PATCH-dev.NUMBER`. Visit [GitHub Releases](https://github.com/AlistairBishop06/frametop-hands-only/releases), check that the two assets are attached, mark dev builds as **Pre-release**, and click **Publish release**.
 
 Running the workflow manually with **Run workflow** uploads an Actions artefact instead; it does **not** create a draft release. A passed CI build alone also does not prove the updated app works correctly on the physical headset.
 

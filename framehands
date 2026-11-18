@@ -223,7 +223,7 @@ def watchdog():
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="framehands")
     parser.add_argument("command", choices=("start", "stop", "restart", "status", "enable", "disable",
-                                            "gestures", "logs", "doctor", "sync", "run-tracker", "run-camd", "run-view", "run-input", "run-dashboard", "register-dashboard", "touch-on", "touch-off", "visuals-on", "visuals-off", "smoothness", "colour", "run-watchdog", "run-game-monitor", "games-on", "games-off", "game-pause", "game-resume"))
+                                            "gestures", "logs", "doctor", "sync", "run-tracker", "run-camd", "run-view", "run-input", "run-dashboard", "register-dashboard", "touch-on", "touch-off", "visuals-on", "visuals-off", "smoothness", "colour", "update-channel", "run-watchdog", "run-game-monitor", "games-on", "games-off", "game-pause", "game-resume"))
     parser.add_argument("value", nargs="?", help="smoothness 0..100 or colour preset")
     args = parser.parse_args(argv)
     cmd = args.command
@@ -303,6 +303,11 @@ def main(argv=None):
                 raise RuntimeError("usage: framehands colour " + "|".join(colours))
             set_config("HANDS_VIEW_COLOUR", args.value)
             print("Hand colour:", args.value)
+        elif cmd == "update-channel":
+            if args.value not in ("stable", "dev"):
+                raise RuntimeError("usage: framehands update-channel stable|dev")
+            set_config("UPDATE_CHANNEL", args.value)
+            print("Update channel:", args.value)
         elif cmd == "register-dashboard":
             binary = str(ROOT / "dashboard/build/framehands-dashboard")
             os.execv(binary, (binary, "--register"))

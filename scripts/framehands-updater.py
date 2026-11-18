@@ -13,8 +13,9 @@ from urllib.request import Request, urlopen
 
 APP = Path(__file__).resolve().parents[1]
 STATUS = Path.home() / ".cache/framehands/update-status"
-API = "https://api.github.com/repos/AlistairBishop06/frametop-hands-only/releases/latest"
-TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)$")
+API = "https://api.github.com/repos/AlistairBishop06/frametop-hands-only/releases"
+CONFIG = Path.home() / ".config/framehands/config"
+TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+))?$")
 
 
 def report(value):
@@ -28,11 +29,35 @@ def fetch(url):
         return response.read()
 
 
-def latest():
-    release = json.loads(fetch(API))
+def channel():
+    if CONFIG.exists():
+        for line in reversed(CONFIG.read_text().splitlines()):
+            if line.startswith("UPDATE_CHANNEL="):
+                return "dev" if line.partition("=")[2].strip() == "dev" else "stable"
+    return "stable"
+
+
+def version(tag):
+    match = TAG.fullmatch(tag)
+    if not match:
+        return None
+    major, minor, patch, dev = match.groups()
+    return (int(major), int(minor), int(patch), 1 if dev is None else 0,
+            int(dev) if dev is not None else 0)
+
+
+def latest(selected_channel):
+    releases = json.loads(fetch(API + "?per_page=100"))
+    candidates = [release for release in releases
+                  if not release.get("draft") and version(release.get("tag_name", ""))
+                  and (selected_channel == "dev" or not release.get("prerelease"))
+                  and (selected_channel != "stable" or "-dev." not in release["tag_name"])
+                  and (selected_channel != "dev" or
+                       release.get("prerelease") == ("-dev." in release["tag_name"]))]
+    if not candidates:
+        raise ValueError("no release found for this channel")
+    release = max(candidates, key=lambda item: version(item["tag_name"]))
     tag = release["tag_name"]
-    if not TAG.fullmatch(tag):
-        raise ValueError("unexpected release version")
     assets = {a["name"]: a["browser_download_url"] for a in release["assets"]}
     for name in ("framehands-aarch64.tar.gz", "SHA256SUMS"):
         expected = f"https://github.com/AlistairBishop06/frametop-hands-only/releases/download/{tag}/{name}"
@@ -41,10 +66,13 @@ def latest():
     return tag, assets
 
 
-def newer(tag):
+def newer(tag, selected_channel):
     installed = (APP / ".framehands-release-tag")
     current = installed.read_text().strip() if installed.exists() else ""
-    return not TAG.fullmatch(current) or tuple(map(int, TAG.fullmatch(tag).groups())) > tuple(map(int, TAG.fullmatch(current).groups()))
+    # Switching back to Stable intentionally offers the latest stable build.
+    if selected_channel == "stable" and "-dev." in current:
+        return True
+    return version(current) is None or version(tag) > version(current)
 
 
 def install(tag, assets):
@@ -84,8 +112,9 @@ def install(tag, assets):
 
 def main():
     try:
-        tag, assets = latest()
-        if not newer(tag):
+        selected_channel = channel()
+        tag, assets = latest(selected_channel)
+        if not newer(tag, selected_channel):
             report("UP TO DATE")
             return 0
         if len(sys.argv) == 2 and sys.argv[1] == "check":

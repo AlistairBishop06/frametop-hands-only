@@ -35,11 +35,14 @@ constexpr Box kTouch{327, 232, 612, 345};
 constexpr Box kGamePause{28, 360, 612, 449};
 constexpr Box kSlider{49, 517, 591, 572};
 constexpr Box kColour{28, 592, 612, 691};
-constexpr Box kUpdate{28, 704, 612, 775};
+constexpr Box kStable{332, 705, 464, 744};
+constexpr Box kDev{472, 705, 612, 744};
+constexpr Box kUpdate{28, 747, 612, 784};
 constexpr int kSliderLeft = 50, kSliderRight = 590;
 std::vector<uint8_t> pixels(W * H * 4);
 std::string updateStatus = "CHECK FOR UPDATES";
 std::string handColour = "white";
+std::string updateChannel = "stable";
 constexpr const char *kColourNames[] = {"red", "orange", "yellow", "green", "blue", "purple", "black", "white"};
 constexpr RGB kColourSwatches[] = {{230, 55, 55}, {246, 132, 37}, {247, 213, 42}, {56, 202, 91},
                                    {62, 126, 238}, {167, 89, 220}, {16, 20, 27}, {244, 248, 253}};
@@ -218,106 +221,84 @@ std::string HandColour() {
     for (const char *name : kColourNames) if (colour == name) return colour;
     return "white";
 }
+std::string UpdateChannel() {
+    const char *home = std::getenv("HOME");
+    if (!home) return "stable";
+    std::ifstream f(std::filesystem::path(home) / ".config/framehands/config");
+    std::string line, channel = "stable";
+    while (std::getline(f, line)) {
+        if (line == "UPDATE_CHANNEL=dev") channel = "dev";
+        else if (line == "UPDATE_CHANNEL=stable") channel = "stable";
+    }
+    return channel;
+}
 void Paint(bool enabled, bool visuals, bool touch, bool gamePause, int smoothness, bool busy, bool failed) {
-    const RGB ink{236, 245, 251}, muted{151, 174, 195}, teal{80, 219, 180};
-    for (int y = 0; y < H; ++y)
-        for (int x = 0; x < W; ++x) {
-            const int dx = x-535, dy = y-8;
-            const int glow = std::max(0, 18 - (dx*dx + dy*dy) / 8500);
-            const auto i = size_t((y * W + x) * 4);
-            pixels[i] = uint8_t(9 + glow/3);
-            pixels[i+1] = uint8_t(17 + glow/2);
-            pixels[i+2] = uint8_t(30 + glow);
-            pixels[i+3] = 255;
-        }
-    Rect(0, 0, W, 5, teal);
-    RoundRect({28, 27, 74, 73}, 14, {30, 107, 120});
-    // A small hand mark gives the app a recognizable silhouette in VR.
-    RoundRect({44, 48, 61, 65}, 6, ink);
-    Rect(43, 40, 47, 54, ink);
-    Rect(49, 35, 53, 53, ink);
-    Rect(55, 38, 59, 53, ink);
-    Rect(61, 43, 65, 54, ink);
-    TextAt(92, 32, "FRAMEHANDS", 4, ink);
-    TextAt(94, 68, "STEAM FRAME CONTROLS", 2, muted);
-
-    const bool paused = gamePause && GamePaused();
-    const RGB status = failed ? RGB{72, 43, 44} : busy ? RGB{50, 64, 82} :
-                       paused ? RGB{84, 67, 42} : enabled ? RGB{25, 75, 70} : RGB{56, 67, 80};
-    RoundRect({394, 34, 574, 69}, 17, status);
-    Circle(410, 51, 5, failed ? RGB{255, 149, 132} : busy ? RGB{255, 194, 103} :
-                         paused ? RGB{255, 194, 103} : enabled ? teal : RGB{153, 170, 185});
-    TextAt(423, 43, failed ? "CHECK LOGS" : busy ? "UPDATING" :
-           paused ? "GAME PAUSED" : enabled ? "TRACKING ON" : "TRACKING OFF", 2, ink);
-    // Closing this panel never changes tracking.
-    RoundRect(kClose, 14, {33, 48, 66});
+    const RGB ink{235, 244, 250}, muted{139, 161, 178}, teal{75, 215, 179};
+    Rect(0, 0, W, H, {12, 20, 31});
+    Rect(0, 0, W, 4, teal);
+    RoundRect({28, 27, 74, 73}, 12, {28, 83, 86});
+    RoundRect({43, 47, 61, 64}, 5, ink);
+    Rect(43, 39, 47, 54, ink); Rect(49, 35, 53, 53, ink);
+    Rect(55, 38, 59, 53, ink); Rect(61, 43, 65, 54, ink);
+    TextAt(91, 31, "FRAMEHANDS", 4, ink);
+    TextAt(93, 67, "HAND TRACKING CONTROLS", 2, muted);
+    RoundRect(kClose, 12, {34, 48, 63});
     for (int i = 0; i < 14; ++i) {
         Rect(595+i, 39+i, 598+i, 42+i, ink);
         Rect(608-i, 39+i, 611-i, 42+i, ink);
     }
+    const bool paused = gamePause && GamePaused();
+    RoundRect(kTracking, 18, {25, 43, 55});
+    RoundRect({28, 105, 33, 218}, 2, enabled ? teal : muted);
+    TextAt(51, 124, "TRACKING", 3, ink);
+    TextAt(51, 164, paused ? "PAUSED FOR VR GAME" : failed ? "CHECK LOGS" :
+           busy ? "APPLYING CHANGE" : enabled ? "HANDS ACTIVE" : "HANDS OFF", 2,
+           paused ? RGB{244, 190, 105} : enabled ? teal : muted);
+    Toggle(514, 139, enabled);
 
-    RoundRect({28, 109, 612, 222}, 18, {5, 11, 22});
-    RoundRect(kTracking, 18, {26, 43, 60});
-    RoundRect({29, 106, 34, 217}, 2, enabled ? teal : RGB{112, 134, 156});
-    TextAt(51, 127, "HAND TRACKING", 3, ink);
-    TextAt(52, 166, "CAMERAS AND HAND INPUT", 2, muted);
-    TextAt(52, 193, enabled ? "OFF HIDES HAND POINTER" : "CONTROLLER NEEDED TO RESTART",
-           2, enabled ? RGB{236, 188, 116} : muted);
-    Toggle(514, 142, enabled);
-
-    RoundRect({28, 236, 311, 349}, 18, {5, 11, 22});
-    RoundRect(kVisuals, 18, {23, 37, 55});
-    TextAt(48, 251, "HAND VISUALS", 2, ink);
-    TextAt(48, 287, "WHITE HANDS", 2, muted);
-    TextAt(48, 319, visuals ? (enabled ? "VISIBLE" : "READY") : "HIDDEN", 2,
-           visuals && enabled ? teal : muted);
-    Toggle(227, 292, visuals);
-
-    RoundRect({327, 236, 612, 349}, 18, {5, 11, 22});
-    RoundRect(kTouch, 18, {23, 37, 55});
-    TextAt(347, 251, "DIRECT TOUCH", 2, ink);
-    TextAt(347, 287, "TOUCH TO CLICK", 2, muted);
-    TextAt(347, 319, touch ? (enabled ? "ENABLED" : "READY") : "DISABLED", 2,
-           touch && enabled ? teal : muted);
-    Toggle(531, 292, touch);
-
-    RoundRect({28, 364, 612, 453}, 18, {5, 11, 22});
-    RoundRect(kGamePause, 18, {23, 37, 55});
-    TextAt(50, 376, "PAUSE FOR GAMES", 2, ink);
-    TextAt(50, 410, "ACTIVE STEAM VR SCENE", 2, muted);
-    TextAt(50, 431, gamePause ? (paused ? "TRACKING PAUSED" : "AUTOMATIC") : "DISABLED", 2,
-           paused ? RGB{236, 188, 116} : muted);
+    TextAt(29, 228, "INTERACTION", 2, muted);
+    RoundRect(kVisuals, 14, {24, 39, 53});
+    TextAt(48, 249, "HAND OVERLAY", 2, ink);
+    TextAt(48, 281, visuals ? "VISIBLE" : "HIDDEN", 2, visuals ? teal : muted);
+    Toggle(227, 291, visuals);
+    RoundRect(kTouch, 14, {24, 39, 53});
+    TextAt(347, 249, "DIRECT TOUCH", 2, ink);
+    TextAt(347, 281, touch ? "ON" : "OFF", 2, touch ? teal : muted);
+    Toggle(531, 291, touch);
+    RoundRect(kGamePause, 14, {24, 39, 53});
+    TextAt(50, 380, "PAUSE DURING VR GAMES", 2, ink);
+    TextAt(50, 414, gamePause ? (paused ? "TRACKING PAUSED" : "AUTOMATIC") : "OFF", 2,
+           paused ? RGB{244, 190, 105} : muted);
     Toggle(514, 385, gamePause);
 
-    RoundRect({28, 474, 612, 579}, 18, {5, 11, 22});
-    RoundRect({28, 470, 612, 575}, 18, {23, 37, 55});
-    TextAt(50, 487, "SMOOTHNESS", 2, ink);
-    TextAt(520, 487, std::to_string(std::clamp(smoothness, 0, 100)), 2, teal);
-    RoundRect({kSliderLeft, 528, kSliderRight, 544}, 8, {53, 70, 89});
+    TextAt(29, 462, "APPEARANCE", 2, muted);
+    RoundRect({28, 489, 612, 579}, 14, {24, 39, 53});
+    TextAt(50, 495, "SMOOTHNESS", 2, ink);
+    TextAt(552, 495, std::to_string(std::clamp(smoothness, 0, 100)), 2, teal);
+    RoundRect({kSliderLeft, 528, kSliderRight, 544}, 8, {52, 68, 83});
     const int knob = kSliderLeft + (kSliderRight-kSliderLeft) * std::clamp(smoothness, 0, 100) / 100;
-    if (knob > kSliderLeft) RoundRect({kSliderLeft, 528, knob, 544}, 8, {56, 177, 164});
-    Circle(knob, 536, 13, ink);
-    Circle(knob, 536, 5, {51, 166, 156});
-    TextAt(50, 553, "LESS", 2, muted);
-    TextAt(542, 553, "MORE", 2, muted);
-    RoundRect(kColour, 18, {23, 37, 55});
-    TextAt(50, 601, "HAND COLOUR", 2, ink);
+    if (knob > kSliderLeft) RoundRect({kSliderLeft, 528, knob, 544}, 8, teal);
+    Circle(knob, 536, 12, ink);
+    RoundRect(kColour, 14, {24, 39, 53});
+    std::string colour = handColour;
+    std::transform(colour.begin(), colour.end(), colour.begin(), [](unsigned char c) { return std::toupper(c); });
+    TextAt(50, 599, "HAND COLOUR", 2, ink);
+    TextAt(450, 599, colour, 2, muted);
     for (int i = 0; i < 8; ++i) {
         const int x = 71 + 68 * i;
         if (handColour == kColourNames[i]) Circle(x, 645, 23, teal);
         Circle(x, 645, 18, kColourSwatches[i]);
-        std::string label = kColourNames[i];
-        std::transform(label.begin(), label.end(), label.begin(), [](unsigned char c) { return std::toupper(c); });
-        TextAt(x - int(label.size()) * 3, 671, label, 1, muted);
     }
-    RoundRect(kUpdate, 18, {25, 56, 70});
-    TextAt(50, 717, "UPDATES", 2, ink);
-    const std::string shownUpdate = updateStatus.rfind("AVAILABLE ", 0) == 0
+    TextAt(29, 704, "UPDATES", 2, muted);
+    RoundRect(kStable, 10, updateChannel == "stable" ? RGB{35, 105, 98} : RGB{34, 48, 63});
+    RoundRect(kDev, 10, updateChannel == "dev" ? RGB{35, 105, 98} : RGB{34, 48, 63});
+    TextAt(359, 716, "STABLE", 2, ink);
+    TextAt(515, 716, "DEV", 2, ink);
+    RoundRect(kUpdate, 10, {32, 91, 85});
+    const std::string shown = updateStatus.rfind("AVAILABLE ", 0) == 0
         ? "DOWNLOAD " + updateStatus.substr(10) : updateStatus;
-    const std::string label = shownUpdate.size() > 28 ? shownUpdate.substr(0, 28) : shownUpdate;
-    TextAt(50, 745, label, 2, updateStatus.rfind("ERROR", 0) == 0 ? RGB{255, 149, 132} : teal);
-    if (updateStatus == "SUDO REQUIRED")
-        TextAt(300, 749, "USE KONSOLE FOR PASSWORD", 1, muted);
+    const std::string label = shown.size() > 31 ? shown.substr(0, 31) : shown;
+    TextAt(50, 759, label, 2, updateStatus.rfind("ERROR", 0) == 0 ? RGB{255, 149, 132} : ink);
 }
 int SmoothnessAt(float x) {
     return std::clamp(int(std::lround((x - kSliderLeft) * 100.0f / (kSliderRight-kSliderLeft))), 0, 100);
@@ -432,6 +413,7 @@ int main(int argc, char **argv) {
     bool gamePause = GamePauseEnabled(), pausedState = GamePaused(), busy = false, failed = false;
     int smoothness = Smoothness();
     handColour = HandColour();
+    updateChannel = UpdateChannel();
     bool sliding = false, updateChild = false, awaitingPassword = false;
     std::string updateVersion;
     pid_t child = -1;
@@ -561,6 +543,22 @@ int main(int argc, char **argv) {
                     }
                     continue;
                 }
+                if (kStable.Contains(x, y) || kDev.Contains(x, y)) {
+                    const std::string target = kDev.Contains(x, y) ? "dev" : "stable";
+                    if (target != updateChannel) {
+                        child = fork();
+                        if (child == 0) {
+                            const std::string cli = Cli().string();
+                            execl(cli.c_str(), cli.c_str(), "update-channel", target.c_str(), (char *)nullptr);
+                            _exit(127);
+                        }
+                        busy = child > 0; failed = child < 0;
+                        if (busy) { updateChannel = target; updateStatus = "CHECK FOR UPDATES"; }
+                        Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                        vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+                    }
+                    continue;
+                }
                 if (kUpdate.Contains(x, y)) {
                     const bool install = updateStatus.rfind("AVAILABLE ", 0) == 0;
                     const std::string version = install ? updateStatus.substr(10) : "";
@@ -677,6 +675,7 @@ int main(int argc, char **argv) {
                 pausedState = GamePaused();
                 smoothness = Smoothness();
                 handColour = HandColour();
+                updateChannel = UpdateChannel();
                 Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
@@ -687,12 +686,14 @@ int main(int argc, char **argv) {
             const bool currentGamePause = GamePauseEnabled(), currentPaused = GamePaused();
             const int currentSmooth = Smoothness();
             const std::string currentColour = HandColour();
+            const std::string currentChannel = UpdateChannel();
             if (!sliding && (current != enabled || currentVisuals != visuals || currentTouch != touch ||
                              currentGamePause != gamePause || currentPaused != pausedState || currentSmooth != smoothness ||
-                             currentColour != handColour)) {
+                             currentColour != handColour || currentChannel != updateChannel)) {
                 enabled = current; visuals = currentVisuals; touch = currentTouch;
                 gamePause = currentGamePause; pausedState = currentPaused; smoothness = currentSmooth;
                 handColour = currentColour;
+                updateChannel = currentChannel;
                 Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
