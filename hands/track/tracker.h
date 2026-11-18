@@ -66,8 +66,6 @@ struct Stats {
     int dups = 0;         // the same hand twice in one camera
     int splits = 0;       // a hand's views disagreed in 3D and were split
     int created = 0, merged = 0, forgotten = 0;   // merged: views re-paired across cameras
-    // diagnostics: on stereo frames, each view's single-view palm distance / the stereo one
-    std::vector<std::pair<int, double>> mono_ratio;   // (hand id, ratio)
 };
 
 // A hand the landmark model found in one camera (Tracker::views_now, Tracker::exhaustive).
@@ -159,6 +157,10 @@ private:
         bool has_lm = false;
         int frames = 0;
         bool fresh = false;     // lm is from this step
+        // Cached per landmark result and camera calibration.
+        mutable bool rays_ready = false;
+        mutable V3 rays[21]{};
+        mutable double mono_range = -1; // -1 unchecked, -2 degenerate palm
     };
     struct Tile {
         const Camera *cam;
@@ -168,7 +170,8 @@ private:
     void run_landmarks(const std::map<std::string, Image> &images, std::vector<View *> &views);
     bool hand_3d(Hand &hand, std::vector<View *> views, int64_t t_ns);
     double pair_cost(const View &a, const View &b) const;
-    double size_misfit(const std::vector<const View *> &views, const V3 *pts) const;
+    static const V3 *view_rays(const View &v);
+    static double size_misfit(const View &v, V3 palm);
     void associate();
     static void smooth(Hand &h, int64_t t_ns);
     bool inside(const Camera &cam, V2 uv) const;

@@ -1,10 +1,12 @@
 #include "nets.h"
+#include "clahe.h"
 
+#include <allocator.h>
 #include <mat.h>
 
 #include <algorithm>
 #include <cstdlib>
-#include <numeric>
+#include <cstring>
 
 namespace {
 
@@ -23,47 +25,6 @@ V2 to_image(const float tm[6], double x, double y) {
     return {tm[0] * x + tm[1] * y + tm[2], tm[3] * x + tm[4] * y + tm[5]};
 }
 
-// OpenCV's CLAHE (4x4 tiles) on a square crop, in place.
-void clahe(uint8_t *img, int n, double clip_limit) {
-    constexpr int kTiles = 4;
-    const int ts = n / kTiles, area = ts * ts;
-    const int clip = std::max(1, int(clip_limit * area / 256));
-    uint8_t lut[kTiles][kTiles][256];
-    for (int ty = 0; ty < kTiles; ++ty)
-        for (int tx = 0; tx < kTiles; ++tx) {
-            int hist[256] = {};
-            for (int y = ty * ts; y < (ty + 1) * ts; ++y)
-                for (int x = tx * ts; x < (tx + 1) * ts; ++x) ++hist[img[y * n + x]];
-            int excess = 0;
-            for (int &h : hist)
-                if (h > clip) excess += h - clip, h = clip;
-            const int add = excess / 256, residual = excess - add * 256;
-            for (int i = 0; i < 256; ++i) hist[i] += add + (i < residual ? 1 : 0);
-            int sum = 0;
-            const float scale = 255.f / area;
-            for (int i = 0; i < 256; ++i) {
-                sum += hist[i];
-                lut[ty][tx][i] = uint8_t(std::min(255, int(sum * scale + 0.5f)));
-            }
-        }
-    std::vector<uint8_t> out(size_t(n) * n);
-    for (int y = 0; y < n; ++y) {
-        const float fy = (y + 0.5f) / ts - 0.5f;
-        const int y0 = std::clamp(int(std::floor(fy)), 0, kTiles - 1), y1 = std::min(y0 + 1, kTiles - 1);
-        const float wy = std::clamp(fy - y0, 0.f, 1.f);
-        for (int x = 0; x < n; ++x) {
-            const float fx = (x + 0.5f) / ts - 0.5f;
-            const int x0 = std::clamp(int(std::floor(fx)), 0, kTiles - 1), x1 = std::min(x0 + 1, kTiles - 1);
-            const float wx = std::clamp(fx - x0, 0.f, 1.f);
-            const uint8_t v = img[y * n + x];
-            const float top = lut[y0][x0][v] * (1 - wx) + lut[y0][x1][v] * wx;
-            const float bot = lut[y1][x0][v] * (1 - wx) + lut[y1][x1][v] * wx;
-            out[size_t(y) * n + x] = uint8_t(top * (1 - wy) + bot * wy + 0.5f);
-        }
-    }
-    std::copy(out.begin(), out.end(), img);
-}
-
 // Linear stretch of the 1st..99th percentile to 0..255, in place.
 void stretch(uint8_t *img, int n) {
     int hist[256] = {};
@@ -79,15 +40,35 @@ void stretch(uint8_t *img, int n) {
     for (int i = 0; i < total; ++i) img[i] = uint8_t(std::clamp((img[i] - lo) * 255 / (hi - lo), 0, 255));
 }
 
-// A crop as the models' input: RGB (the mono plane three times), 0..1.
-ncnn::Mat crop(const Image &img, const float tm[6], int n, const Contrast &contrast) {
-    std::vector<uint8_t> patch(size_t(n) * n);
-    ncnn::warpaffine_bilinear_c1(img.data, img.width, img.height, img.stride, patch.data(), n, n, n, tm, 0, 0);
-    if (contrast.mode == Contrast::Clahe) clahe(patch.data(), n, contrast.clip);
-    else if (contrast.mode == Contrast::Stretch) stretch(patch.data(), n);
-    ncnn::Mat m = ncnn::Mat::from_pixels(patch.data(), ncnn::Mat::PIXEL_GRAY2RGB, n, n);
-    const float norm[3] = {1 / 255.f, 1 / 255.f, 1 / 255.f};
-    m.substract_mean_normalize(nullptr, norm);
+// Parallelism is across camera crops. Each worker owns its intermediate
+// tensors and temporary image, so it can reuse memory without allocator locks.
+struct InferenceScratch {
+    ncnn::UnlockedPoolAllocator blobs, workspace;
+    uint8_t pixels[kHandSize * kHandSize];
+
+    ncnn::Extractor extractor(const ncnn::Net &net) {
+        auto ex = net.create_extractor();
+        ex.set_blob_allocator(&blobs);
+        ex.set_workspace_allocator(&workspace);
+        return ex;
+    }
+};
+thread_local InferenceScratch scratch;
+
+// Both models take three identical float planes. Normalize once, then copy the
+// plane; this is the same byte-to-float multiplication as ncnn's Scale layer.
+template<int N>
+ncnn::Mat crop(const Image &img, const float tm[6], const Contrast &contrast) {
+    uint8_t *patch = scratch.pixels;
+    ncnn::warpaffine_bilinear_c1(img.data, img.width, img.height, img.stride, patch, N, N, N, tm, 0, 0);
+    if (contrast.mode == Contrast::Clahe) fh_crop::clahe<N>(patch, contrast.clip);
+    else if (contrast.mode == Contrast::Stretch) stretch(patch, N);
+    ncnn::Mat m(N, N, 3, sizeof(float), &scratch.blobs);
+    if (m.empty()) return m;
+    float *plane = m.channel(0);
+    for (int i = 0; i < N * N; ++i) plane[i] = patch[i] * (1 / 255.f);
+    std::memcpy(m.channel(1).data, plane, N * N * sizeof(float));
+    std::memcpy(m.channel(2).data, plane, N * N * sizeof(float));
     return m;
 }
 
@@ -114,6 +95,7 @@ namespace {
 
 bool load_net(ncnn::Net &net, const std::string &base, std::string &err) {
     net.opt.num_threads = 1;
+    net.opt.use_local_pool_allocator = false; // each worker supplies its own pool
     net.opt.use_vulkan_compute = false;
     net.opt.use_fp16_packed = net.opt.use_fp16_storage = net.opt.use_fp16_arithmetic = true;
     if (net.load_param((base + ".param").c_str()) || net.load_model((base + ".bin").c_str())) {
@@ -175,11 +157,12 @@ bool Nets::load(const std::string &dir, bool int8, std::string &err) {
 std::vector<Palm> Nets::palms(const Image &img, V2 center, double size, double rotation) const {
     float tm[6];
     crop_matrix(center, size, rotation, kPalmSize, tm);
-    ncnn::Extractor ex = palm_.create_extractor();
-    ex.input("in0", crop(img, tm, kPalmSize, palm_contrast_));
+    auto ex = scratch.extractor(palm_);
+    const auto input = crop<kPalmSize>(img, tm, palm_contrast_);
     ncnn::Mat boxes, scores;
-    ex.extract("out0", boxes);
-    ex.extract("out1", scores);
+    if (input.empty() || ex.input("in0", input) || ex.extract("out0", boxes) ||
+        ex.extract("out1", scores) || boxes.empty() || scores.empty() ||
+        boxes.total() < anchors_.size() * 18 || scores.total() < anchors_.size()) return {};
     const float *raw = boxes, *logit = scores;
     const int n = int(anchors_.size());
     const float min_logit = std::log(0.5f / 0.5f);  // score 0.5
@@ -236,18 +219,23 @@ std::vector<Palm> Nets::palms(const Image &img, V2 center, double size, double r
 Landmarks Nets::landmarks(const Image &img, const Roi &roi) const {
     float tm[6];
     crop_matrix(roi.center, roi.size, roi.rotation, kHandSize, tm);
-    ncnn::Extractor ex = hand_.create_extractor();
-    ex.input("in0", crop(img, tm, kHandSize, hand_contrast_));
+    auto ex = scratch.extractor(hand_);
+    const auto input = crop<kHandSize>(img, tm, hand_contrast_);
     ncnn::Mat screen, presence, right, world;
-    ex.extract("out0", screen);
-    ex.extract("out1", presence);
-    ex.extract("out2", right);
-    ex.extract("out3", world);
+    if (input.empty() || ex.input("in0", input) || ex.extract("out0", screen) || ex.extract("out1", presence) ||
+        presence.empty() || !std::isfinite(presence[0]) ||
+        ex.extract("out2", right) || ex.extract("out3", world) ||
+        screen.empty() || right.empty() || world.empty() || screen.total() < 63 || world.total() < 63) return {};
     Landmarks lm;
     const float *s = screen, *w = world;
+    if (!std::isfinite(right[0])) return {};
     for (int i = 0; i < 21; ++i) {
+        if (!std::isfinite(s[3 * i]) || !std::isfinite(s[3 * i + 1])) return {};
         lm.pts[i] = to_image(tm, s[3 * i], s[3 * i + 1]);
-        for (int k = 0; k < 3; ++k) lm.world[i][k] = w[3 * i + k];
+        for (int k = 0; k < 3; ++k) {
+            if (!std::isfinite(w[3 * i + k])) return {};
+            lm.world[i][k] = w[3 * i + k];
+        }
     }
     lm.presence = presence[0];
     lm.right = right[0];

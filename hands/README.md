@@ -7,3 +7,13 @@
 `models/ncnn/` contains the stock fallback. `models.sh fetch` downloads the fine-tuned model at the exact commit and hashes in `models.pin` into `models/student/`. It is licensed separately and ships with its own license and notice. `HANDS_MODEL=stock` selects stock; `latest` selects the fine-tuned model when present. The release packages both.
 
 Build and offline tests are in `Makefile`; run them through `bash scripts/build.sh` from the repository root on ARM64 Linux. The source retains offline recording structures used by the tracker and its tests, but no recorder app or upload system is installed.
+
+## Measure tracking performance on the Frame
+
+```sh
+journalctl --user -u framehands-track.service -n 50 --no-pager
+```
+
+Each status report shows completed camera sets per second, palm and landmark inference time per batch, tracker step time, dequeue to publication latency (median and 95th percentile), CPU use and stereo residual in millimetres. Dequeue to publication measures the tracker pipeline from the camera broker's dequeue timestamp to the shared hand and gesture data. It excludes camera exposure and SteamVR display time.
+
+Compare Stable and Dev with the same lighting, headset settings and movements. Use separate intervals for hands out of view, a moving single hand, and two moving hands. Check the rate and latency alongside stereo residual, view losses and splits. The tracker intentionally runs slower while hands are still or absent, so a faster build can lower CPU use and latency while reporting the same frame rate.

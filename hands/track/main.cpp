@@ -57,6 +57,7 @@
 // checked 4 times a second and removed when taken; the folder's manifest.json is written last.
 #include "../../config/ft_conf.h"
 #include "flagbuf.h"
+#include "frame_pair.h"
 #include "io.h"
 #include "pinch.h"
 #include "record.h"
@@ -609,26 +610,26 @@ int main(int argc, char **argv) {
     bool follow_in_step = true;
     double follow_rate = 1;      // how often the uppers met a set lately (a moving average)
     uint64_t prev_t0 = 0, prev_t1 = 0;
-    // a camera's frame from within 3 ms of the set's frames (taken t0 to t1), newer than after, or 0
-    auto follow_frame = [&](int i, uint64_t t0, uint64_t t1, uint64_t after) -> uint64_t {
+    // A camera frame within 3 ms of the entire set, newer than after.
+    auto follow_frame = [&](int i, uint64_t t0, uint64_t t1, uint64_t after) -> fh_frames::Stamp {
         uint64_t n = ring.latest(i);
-        for (int k = 0; k < 4 && n > after; ++k, --n) {
+        for (int k = 0; k < FH_RING_SLOTS && n > after; ++k, --n) {
             fh_ring_slot_t m;
             if (!ring.meta(i, n, &m)) continue;
-            if (m.capture_ns + 3'000'000 < t1) break;   // older than the set: earlier ones are too
-            if (m.capture_ns <= t0 + 3'000'000) return n;
+            if (m.capture_ns + fh_frames::kMaxSkewNs < t1) break; // earlier ones are too old
+            if (m.capture_ns <= t0 + fh_frames::kMaxSkewNs) return {n, m.capture_ns, m.dqbuf_ns};
         }
-        return 0;
+        return {};
     };
     // Did camera i take a frame within 3 ms of t0 to t1? 1 yes, 0 no, -1 can't tell: the ring
     // (4 frames) no longer reaches back that far, as when a step took long.
     auto met_set = [&](int i, uint64_t t0, uint64_t t1) -> int {
         const uint64_t latest = ring.latest(i);
-        for (uint64_t n = latest; n > 0 && latest - n < 4; --n) {
+        for (uint64_t n = latest; n > 0 && latest - n < FH_RING_SLOTS; --n) {
             fh_ring_slot_t m;
             if (!ring.meta(i, n, &m)) return -1;
-            if (m.capture_ns + 3'000'000 < t1) return 0;
-            if (m.capture_ns <= t0 + 3'000'000) return 1;
+            if (m.capture_ns + fh_frames::kMaxSkewNs < t1) return 0;
+            if (m.capture_ns <= t0 + fh_frames::kMaxSkewNs) return 1;
         }
         return -1;
     };
@@ -685,7 +686,7 @@ int main(int argc, char **argv) {
     const uint64_t start = mono_ns();
     uint64_t t_status = start, next_ns = 0, t_want = 0, t_glog = 0;
     double cpu0 = cpu_seconds();
-    std::vector<double> lat;
+    std::vector<double> latency;
     double hands_sum = 0, resid_sum = 0;
     int resid_n = 0, left_sets = 0, right_sets = 0, both_sets = 0, color_steps = 0;
     // The mono cameras' delay from capture to dequeue (their capture clock is CLOCK_MONOTONIC_RAW),
@@ -979,39 +980,33 @@ int main(int argc, char **argv) {
                 met = met && ring.meta(index[name], latest[name], &meta);
                 if (met) t0 = std::min(t0, meta.capture_ns), t1 = std::max(t1, meta.capture_ns), lead_dq = std::max(lead_dq, meta.dqbuf_ns);
             }
-            if (!met || t1 - t0 > 3'000'000) {
+            if (!met || t1 - t0 > fh_frames::kMaxSkewNs) {
                 // Side-camera reads can straddle a camera tick. Search the last four
                 // unconsumed frames for a truly synchronous pair before dropping
                 // the whole set. Never combine frames taken 30 ms apart.
                 bool matched = false;
                 if (lead.size() == 2) {
                     const auto &a = lead[0], &b = lead[1];
-                    uint64_t bestA = 0, bestB = 0, bestGap = 3'000'001;
-                    fh_ring_slot_t bestAM{}, bestBM{};
-                    for (int j = 0; j < 4; ++j) {
-                        const uint64_t na = ring.latest(index[a]);
-                        if (na <= uint64_t(j) || na - j <= last[a]) break;
-                        fh_ring_slot_t ma{};
-                        if (!ring.meta(index[a], na - j, &ma)) continue;
-                        for (int k = 0; k < 4; ++k) {
-                            const uint64_t nb = ring.latest(index[b]);
-                            if (nb <= uint64_t(k) || nb - k <= last[b]) break;
-                            fh_ring_slot_t mb{};
-                            if (!ring.meta(index[b], nb - k, &mb)) continue;
-                            const uint64_t gap = ma.capture_ns > mb.capture_ns
-                                ? ma.capture_ns - mb.capture_ns : mb.capture_ns - ma.capture_ns;
-                            if (gap <= 3'000'000 && (gap < bestGap ||
-                                (gap == bestGap && na - j + nb - k > bestA + bestB))) {
-                                bestGap = gap; bestA = na - j; bestB = nb - k;
-                                bestAM = ma; bestBM = mb; matched = true;
-                            }
+                    auto recent = [&](const std::string &name) {
+                        std::array<fh_frames::Stamp, FH_RING_SLOTS> frames{};
+                        const int cam = index.at(name);
+                        const uint64_t after = last.at(name);
+                        uint64_t n = ring.latest(cam);
+                        for (auto &frame : frames) {
+                            if (n <= after) break;
+                            fh_ring_slot_t meta;
+                            if (ring.meta(cam, n, &meta)) frame = {n, meta.capture_ns, meta.dqbuf_ns};
+                            --n;
                         }
-                    }
+                        return frames;
+                    };
+                    const auto pair = fh_frames::latest_pair(recent(a), recent(b));
+                    matched = pair[0].frame != 0;
                     if (matched) {
-                        latest[a] = bestA; latest[b] = bestB;
-                        t0 = std::min(bestAM.capture_ns, bestBM.capture_ns);
-                        t1 = std::max(bestAM.capture_ns, bestBM.capture_ns);
-                        lead_dq = std::max(bestAM.dqbuf_ns, bestBM.dqbuf_ns);
+                        latest[a] = pair[0].frame; latest[b] = pair[1].frame;
+                        t0 = std::min(pair[0].capture, pair[1].capture);
+                        t1 = std::max(pair[0].capture, pair[1].capture);
+                        lead_dq = std::max(pair[0].dequeue, pair[1].dequeue);
                     }
                 }
                 if (!matched) {
@@ -1019,25 +1014,31 @@ int main(int argc, char **argv) {
                     continue;
                 }
             }
+            // Sets below the tracking cadence need no upper frames. Their
+            // synchronisation is still sampled by note_step on the next set.
+            if (track && !rec && !g_record && t0 < next_ns) {
+                note_step(t0, t1);
+                for (const std::string &name : lead) last[name] = latest[name];
+                continue;
+            }
             // the uppers' frames from the same moment: in step, theirs may be a few ms behind
             std::map<std::string, uint64_t> with;
+            uint64_t set_first = t0, set_last = t1;
             if (follow_in_step)
                 for (const std::string &name : follow)
-                    if (const uint64_t n = follow_frame(index[name], t0, t1, last[name])) with[name] = n;
+                    if (const auto stamp = follow_frame(index[name], set_first, set_last, last[name]); stamp.frame) {
+                        set_first = std::min(set_first, stamp.capture);
+                        set_last = std::max(set_last, stamp.capture);
+                        with[name] = stamp.frame;
+                    }
             if (follow_in_step && with.size() < follow.size() && mono_ns() < lead_dq + 8'000'000) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             const bool full = with.size() == follow.size();
-            // not needed at the current rate, and not recorded: skip it without copying images
-            if (track && !rec && !g_record && t0 < next_ns) {
-                note_step(t0, t1);
-                for (const std::string &name : lead) last[name] = latest[name];
-                for (auto &[name, n] : with) last[name] = n;
-                continue;
-            }
             for (auto &[name, n] : with) latest[name] = n;
             std::vector<SetFrame> frames;
+            const bool save_frames = rec || g_record;
             uint64_t tmax = 0;
             bool ok = true;
             for (auto &[name, n] : latest) {
@@ -1047,18 +1048,19 @@ int main(int argc, char **argv) {
                 if (!ok) break;
                 const auto &c = ring.camera(i);
                 images[name] = {pixels[name].data(), int(c.width), int(c.height), int(c.width)};
-                frames.push_back({name, pixels[name].data(), c.width, c.height, meta.capture_ns, meta.dqbuf_ns});
+                if (save_frames)
+                    frames.push_back({name, pixels[name].data(), c.width, c.height, meta.capture_ns, meta.dqbuf_ns});
                 tmin = std::min(tmin, meta.capture_ns), tmax = std::max(tmax, meta.capture_ns), dq = std::max(dq, meta.dqbuf_ns);
                 const double delay = double(int64_t(meta.dqbuf_ns) - (int64_t(meta.capture_ns) - raw_off));
                 mono_delay_ns = mono_delay_ns < 0 ? delay : mono_delay_ns + 0.02 * (delay - mono_delay_ns);
             }
-            if (!ok || tmax - tmin > 3'000'000) {   // torn, or a camera is a frame behind
+            if (!ok || tmax - tmin > fh_frames::kMaxSkewNs) {   // torn, or a camera is a frame behind
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             note_step(t0, t1);
             for (auto &[name, n] : latest) last[name] = n;
-            if (g_record && !rec) {
+            if (g_record && !rec && save_frames) {
                 g_record = 0;
                 char name[64];
                 const std::time_t now = std::time(nullptr);
@@ -1163,6 +1165,7 @@ int main(int argc, char **argv) {
                                    0.005) * 1e9);
         if (publish) pub.write(hands, capture);
         if (publish && gestures_on) gestures.write(pinch, grip, capture, &middle);
+        if (status > 0 && dq) latency.push_back((mono_ns() - dq) / 1e6);
         if (flags)
             flags->add(int64_t(tmin), int64_t(capture), -1, images, views,
                        output_json(hands, gestures_on ? &pinch : nullptr, gestures_on ? &middle : nullptr, gestures_on ? &grip : nullptr));
@@ -1175,7 +1178,6 @@ int main(int argc, char **argv) {
         for (const Pinch::Event &e : middle.events)
             std::printf("middle pinch %s %-5s d %.3f m at %+.3f %+.3f %+.3f\n", e.side ? "right" : "left ", e.what,
                         e.distance, e.point[0], e.point[1], e.point[2]);
-        lat.push_back((mono_ns() - dq) / 1e6);
         hands_sum += double(hands.size());
         bool on_left = false, on_right = false;   // by where the wrist is, not the model's label
         for (const Hand *h : hands) {
@@ -1188,13 +1190,15 @@ int main(int argc, char **argv) {
         if (status > 0 && (now - t_status) / 1e9 >= status) {
             const double dt = (now - t_status) / 1e9, cpu1 = cpu_seconds();
             const Stats &s = tracker.stats;
-            std::sort(lat.begin(), lat.end());
+            std::sort(latency.begin(), latency.end());
             std::printf("%5.1fs %4.1f sets/s  hands %.2f views %zu  palm %3d calls %4.1f ms/batch  hand %3d calls %4.1f ms/batch  "
-                        "step %4.1f ms  latency %4.1f ms  resid %.1f mm  fit %.0f us  CPU %3.0f%%\n",
+                        "step %4.1f ms  dequeue-to-publish p50/p95 %4.1f/%4.1f ms  resid %.1f mm  fit %.0f us  CPU %3.0f%%\n",
                         (now - start) / 1e9, s.sets / dt, s.sets ? hands_sum / s.sets : 0, tracker.views(), s.palm_calls,
                         s.palm_batches ? s.palm_ms / s.palm_batches : 0, s.hand_calls,
                         s.hand_batches ? s.hand_ms / s.hand_batches : 0, s.sets ? s.step_ms / s.sets : 0,
-                        lat.empty() ? 0 : lat[lat.size() / 2], resid_n ? resid_sum / resid_n : 0,
+                        latency.empty() ? 0 : latency[latency.size() / 2],
+                        latency.empty() ? 0 : latency[(latency.size() * 95 + 99) / 100 - 1],
+                        resid_n ? resid_sum / resid_n : 0,
                         tracker.skeleton().fits ? tracker.skeleton().us_total / tracker.skeleton().fits : 0.0,
                         100 * (cpu1 - cpu0) / dt);
             tracker.skeleton().fits = 0, tracker.skeleton().us_total = 0;
@@ -1243,7 +1247,7 @@ int main(int argc, char **argv) {
             std::fflush(stdout);
             tracker.stats = Stats{};
             t_status = now, cpu0 = cpu1;
-            lat.clear(), hands_sum = 0, resid_sum = 0, resid_n = 0, left_sets = right_sets = both_sets = 0;
+            latency.clear(), hands_sum = 0, resid_sum = 0, resid_n = 0, left_sets = right_sets = both_sets = 0;
             color_steps = 0;
         }
     }

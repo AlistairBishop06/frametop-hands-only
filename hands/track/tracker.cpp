@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <iterator>
 #include <set>
 
 namespace {
@@ -44,9 +45,10 @@ V2 palm_centre(const Landmarks &lm) { return lm.pts[9]; }
 // Two views in one camera on the same hand: the landmark model puts the same points on
 // it from both crops, even when the crops differ.
 bool same_hand(const Landmarks &a, const Landmarks &b, double size) {
+    if (norm(palm_centre(a) - palm_centre(b)) < 0.5 * size) return true;
     double d = 0;
     for (int i = 0; i < 21; ++i) d += norm(a.pts[i] - b.pts[i]) / 21;
-    return norm(palm_centre(a) - palm_centre(b)) < 0.5 * size || d < 0.25 * size;
+    return d < 0.25 * size;
 }
 
 double hand_size(const Landmarks &lm) {
@@ -191,6 +193,7 @@ void Tracker::run_landmarks(const std::map<std::string, Image> &images, std::vec
         const Image &img = images.at(v->cam->name);
         jobs.push_back([this, v, &img] {
             v->lm = nets_.landmarks(img, v->roi);
+            v->rays_ready = false;
             v->has_lm = true;
             v->fresh = true;
         });
@@ -201,42 +204,69 @@ void Tracker::run_landmarks(const std::map<std::string, Image> &images, std::vec
     ++stats.hand_batches;
 }
 
-bool Tracker::single_view(const Camera &cam, const Landmarks &lm, double scale, V3 out[21]) {
-    V3 rays[21];
-    for (int i = 0; i < 21; ++i) rays[i] = cam.ray(lm.pts[i]);
-    std::vector<std::pair<double, double>> est;   // (depth, weight)
+namespace {
+double palm_depth(const Landmarks &lm, const V3 *rays, double scale) {
+    std::array<std::pair<double, double>, std::size(kPalmPairs)> est; // (depth, weight)
+    size_t count = 0;
     for (const auto &pr : kPalmPairs) {
         const int i = pr[0], j = pr[1];
         const double d = std::hypot(lm.world[i][0] - lm.world[j][0], lm.world[i][1] - lm.world[j][1]) * scale;
+        if (!(d > 0.01)) continue;
         const double a = std::acos(std::clamp(dot(rays[i], rays[j]), -1.0, 1.0));
-        if (a > 1e-3 && d > 0.01) est.push_back({d / a, d});
+        if (a > 1e-3) est[count++] = {d / a, d};
     }
-    if (est.empty()) return false;
-    std::sort(est.begin(), est.end());
-    double total = 0, acc = 0, depth = est.back().first;
-    for (auto &e : est) total += e.second;
-    for (auto &e : est)
-        if ((acc += e.second) >= total / 2) { depth = e.first; break; }
+    if (!count) return 0;
+    std::sort(est.begin(), est.begin() + count);
+    double total = 0, acc = 0;
+    for (size_t i = 0; i < count; ++i) total += est[i].second;
+    for (size_t i = 0; i < count; ++i)
+        if ((acc += est[i].second) >= total / 2) return est[i].first;
+    return est[count - 1].first;
+}
+
+double mean_model_depth(const Landmarks &lm) {
     double zmean = 0;
     for (int i = 0; i < 21; ++i) zmean += lm.world[i][2] / 21;
+    return zmean;
+}
+
+bool single_view_from_rays(const Camera &cam, const Landmarks &lm, const V3 *rays, double scale, V3 out[21]) {
+    const double depth = palm_depth(lm, rays, scale);
+    if (depth == 0) return false;
+    const double zmean = mean_model_depth(lm);
     for (int i = 0; i < 21; ++i) out[i] = cam.origin + rays[i] * (depth + (lm.world[i][2] - zmean) * scale);
     return true;
 }
+}  // namespace
 
-// A triangulated hand is in front of each camera, as far as its apparent size says (see
-// kSizePrior). Returns how far off that is (the sum of |log| ratios), or -1 if implausible.
-double Tracker::size_misfit(const std::vector<const View *> &views, const V3 *pts) const {
-    double misfit = 0;
-    for (const View *v : views) {
-        V3 mono[21];
-        // along the view's own ray (fisheye: a hand near the image edge is far off the axis)
-        if (dot(pts[9] - v->cam->origin, v->cam->ray(v->lm.pts[9])) < 0.08) return -1;
-        if (!single_view(*v->cam, v->lm, 1.0, mono)) continue;
-        const double r = norm(pts[9] - v->cam->origin) / norm(mono[9] - v->cam->origin);
-        if (r < kRatioLo || r > kRatioHi) return -1;
-        misfit += std::fabs(std::log(r / kSizePrior));
+bool Tracker::single_view(const Camera &cam, const Landmarks &lm, double scale, V3 out[21]) {
+    V3 rays[21];
+    for (int i = 0; i < 21; ++i) rays[i] = cam.ray(lm.pts[i]);
+    return single_view_from_rays(cam, lm, rays, scale, out);
+}
+
+const V3 *Tracker::view_rays(const View &v) {
+    if (!v.rays_ready) {
+        for (int i = 0; i < 21; ++i) v.rays[i] = v.cam->ray(v.lm.pts[i]);
+        v.rays_ready = true;
+        v.mono_range = -1;
     }
-    return misfit;
+    return v.rays;
+}
+
+// Only the middle knuckle is needed for the apparent-size check.
+double Tracker::size_misfit(const View &v, V3 palm) {
+    const V3 *rays = view_rays(v);
+    const V3 delta = palm - v.cam->origin;
+    if (dot(delta, rays[9]) < 0.08) return -1;
+    if (v.mono_range == -1) {
+        const double depth = palm_depth(v.lm, rays, 1.0);
+        const V3 offset = rays[9] * (depth + (v.lm.world[9][2] - mean_model_depth(v.lm)));
+        v.mono_range = depth > 0 ? norm((v.cam->origin + offset) - v.cam->origin) : -2;
+    }
+    if (v.mono_range == -2) return 0;
+    const double r = norm(delta) / v.mono_range;
+    return r < kRatioLo || r > kRatioHi ? -1 : std::fabs(std::log(r / kSizePrior));
 }
 
 bool Tracker::hand_3d(Hand &hand, std::vector<View *> views, int64_t t_ns) {
@@ -245,14 +275,18 @@ bool Tracker::hand_3d(Hand &hand, std::vector<View *> views, int64_t t_ns) {
     if (views.size() >= 2) {
         const int n = int(views.size());
         std::vector<V3> origins(n), dirs(n);
-        std::vector<double> w(n), res(21);
+        std::vector<double> w(n);
+        std::vector<const V3 *> rays;
+        rays.reserve(n);
+        for (int v = 0; v < n; ++v) {
+            rays.push_back(view_rays(*views[v]));
+            origins[v] = views[v]->cam->origin;
+            w[v] = views[v]->lm.presence;
+        }
+        std::array<double, 21> res;
         V3 pts[21];
         for (int k = 0; k < 21; ++k) {
-            for (int v = 0; v < n; ++v) {
-                origins[v] = views[v]->cam->origin;
-                dirs[v] = views[v]->cam->ray(views[v]->lm.pts[k]);
-                w[v] = views[v]->lm.presence;
-            }
+            for (int v = 0; v < n; ++v) dirs[v] = rays[v][k];
             pts[k] = triangulate(origins.data(), dirs.data(), w.data(), n, &res[k]);
         }
         double res_pt[21];
@@ -261,7 +295,9 @@ bool Tracker::hand_3d(Hand &hand, std::vector<View *> views, int64_t t_ns) {
         const double residual = res[10];
         // the views disagree: two different hands; keep the stronger. Rays to two different
         // hands can pass close to each other near the cameras, so check the distance too.
-        if (residual > 0.03 || size_misfit({views.begin(), views.end()}, pts) < 0) {
+        if (residual > 0.03 || std::any_of(views.begin(), views.end(), [&](const View *v) {
+                return size_misfit(*v, pts[9]) < 0;
+            })) {
             View *best = *std::max_element(views.begin(), views.end(),
                                            [](View *a, View *b) { return a->lm.presence < b->lm.presence; });
             // a view that disagrees but sits where this hand already is in its camera is this hand
@@ -278,33 +314,31 @@ bool Tracker::hand_3d(Hand &hand, std::vector<View *> views, int64_t t_ns) {
             note("split %d residual %.3f keep %s", hand.id, residual, best->cam->name.c_str());
             return hand_3d(hand, {best}, t_ns);
         }
-        // learn how big this user's hand is compared to the model's average hand
-        std::vector<double> t, m;
-        const Landmarks &ref = views[0]->lm;
-        for (const auto &pr : kPalmPairs) {
-            t.push_back(norm(pts[pr[0]] - pts[pr[1]]));
-            m.push_back(norm(V3{ref.world[pr[0]][0], ref.world[pr[0]][1], ref.world[pr[0]][2]} -
-                             V3{ref.world[pr[1]][0], ref.world[pr[1]][1], ref.world[pr[1]][2]}));
+        // Learn the user's hand size only from clean stereo matches.
+        if (residual < 0.008) {
+            std::array<double, std::size(kPalmPairs)> t, m;
+            const Landmarks &ref = views[0]->lm;
+            for (size_t i = 0; i < t.size(); ++i) {
+                const auto &pr = kPalmPairs[i];
+                t[i] = norm(pts[pr[0]] - pts[pr[1]]);
+                m[i] = norm(V3{ref.world[pr[0]][0], ref.world[pr[0]][1], ref.world[pr[0]][2]} -
+                            V3{ref.world[pr[1]][0], ref.world[pr[1]][1], ref.world[pr[1]][2]});
+            }
+            const size_t mid = t.size() / 2;
+            std::nth_element(t.begin(), t.begin() + mid, t.end());
+            std::nth_element(m.begin(), m.begin() + mid, m.end());
+            if (m[mid] > 0)
+                hand.scale += 0.1 * (std::clamp(t[mid] / m[mid], 0.8, 1.6) - hand.scale);
         }
-        std::nth_element(t.begin(), t.begin() + t.size() / 2, t.end());
-        std::nth_element(m.begin(), m.begin() + m.size() / 2, m.end());
-        if (m[m.size() / 2] > 0 && residual < 0.008)   // only from clean matches
-            hand.scale += 0.1 * (std::clamp(t[t.size() / 2] / m[m.size() / 2], 0.8, 1.6) - hand.scale);
         std::copy(pts, pts + 21, hand.pts);
         hand.residual = residual;
         std::copy(res_pt, res_pt + 21, hand.res_pt);
         hand.eye = {0, 0, 0};
         for (View *v : views) hand.eye = hand.eye + v->cam->origin * (1.0 / views.size());
-        for (View *v : views) {
-            V3 mono[21];
-            if (!single_view(*v->cam, v->lm, hand.scale, mono)) continue;
-            const V3 o = v->cam->origin;
-            stats.mono_ratio.push_back({hand.id, norm(mono[9] - o) / norm(pts[9] - o)});
-        }
     } else {
         const Camera &cam = *views[0]->cam;
         V3 pts[21];
-        if (!single_view(cam, views[0]->lm, hand.scale, pts)) return false;
+        if (!single_view_from_rays(cam, views[0]->lm, view_rays(*views[0]), hand.scale, pts)) return false;
         const double guess = norm(pts[9] - cam.origin);
         if (hand.has_pts && t_ns - hand.seen_ns < 300'000'000 && guess > 0) {
             const double was = norm(hand.pts[9] - cam.origin), d = was + kMonoDepthGain * (guess - was);
@@ -330,18 +364,22 @@ bool Tracker::hand_3d(Hand &hand, std::vector<View *> views, int64_t t_ns) {
 // (left or right). Negative if they can't be one hand. Side by side hands sit on the same
 // epipolar lines of the side cameras, so the distance check is what tells them apart.
 double Tracker::pair_cost(const View &a, const View &b) const {
-    V3 pts[21];
-    std::vector<double> res(21);
+    V3 palm{};
+    std::array<double, 21> res;
+    const V3 *ar = view_rays(a), *br = view_rays(b);
+    const V3 o[2] = {a.cam->origin, b.cam->origin};
+    const double w[2] = {a.lm.presence, b.lm.presence};
     for (int k = 0; k < 21; ++k) {
-        const V3 o[2] = {a.cam->origin, b.cam->origin};
-        const V3 d[2] = {a.cam->ray(a.lm.pts[k]), b.cam->ray(b.lm.pts[k])};
-        const double w[2] = {a.lm.presence, b.lm.presence};
-        pts[k] = triangulate(o, d, w, 2, &res[k]);
+        const V3 d[2] = {ar[k], br[k]};
+        const V3 pt = triangulate(o, d, w, 2, &res[k]);
+        if (k == 9) palm = pt;
     }
     std::nth_element(res.begin(), res.begin() + 10, res.end());
     if (res[10] > 0.03) return -1;
-    const double misfit = size_misfit({&a, &b}, pts);
-    return misfit < 0 ? -1 : res[10] / 0.01 + misfit + std::fabs(a.lm.right - b.lm.right);
+    const double ma = size_misfit(a, palm);
+    if (ma < 0) return -1;
+    const double mb = size_misfit(b, palm);
+    return mb < 0 ? -1 : res[10] / 0.01 + (ma + mb) + std::fabs(a.lm.right - b.lm.right);
 }
 
 // Which views in two cameras are the same hand: every way of pairing them up (a few views
@@ -764,7 +802,11 @@ std::vector<Seen> Tracker::views_now() const {
 void Tracker::exchange(const std::string &a, const std::string &b) {
     if (!cams_.count(a) || !cams_.count(b)) return;
     const Camera *ca = cams_[a], *cb = cams_[b];
-    for (View &v : views_) v.cam = v.cam == ca ? cb : v.cam == cb ? ca : v.cam;
+    for (View &v : views_) {
+        if (v.cam != ca && v.cam != cb) continue;
+        v.cam = v.cam == ca ? cb : ca;
+        v.rays_ready = false;
+    }
     for (auto &[id, h] : hands_) h.has_pts = false, h.frames = 0, h.residual = -1, h.fit.valid = false;
 }
 
