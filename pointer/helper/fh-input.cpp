@@ -1,7 +1,8 @@
 // Dashboard and undocked-panel pointer. The SteamVR driver remains disconnected
-// until a bare hand is pointing at the dashboard; no game input is synthesized.
+// until a bare hand is available for overlay input; no game input is synthesized.
 #include "../../config/ftsock.h"
 #include "../../renderer/handcut.h"
+#include "pointer_rotation.h"
 
 #include <openvr.h>
 #include <sys/socket.h>
@@ -16,6 +17,7 @@
 #include <thread>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -23,13 +25,15 @@
 
 namespace {
 using Clock = std::chrono::steady_clock;
+using pointer_pose::AimRotation;
+using pointer_pose::Dot;
+using pointer_pose::GrabRotation;
+using pointer_pose::Length;
+using pointer_pose::PalmRotation;
+using pointer_pose::Quaternion;
+using pointer_pose::V;
 int64_t NowNs() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
-struct V { double x, y, z; };
 V Position(const vr::HmdMatrix34_t &m) { return {m.m[0][3], m.m[1][3], m.m[2][3]}; }
-V operator-(V a, V b) { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
-V operator+(V a, V b) { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
-V operator*(V a, double k) { return {a.x*k, a.y*k, a.z*k}; }
-double Length(V a) { return std::sqrt(a.x*a.x+a.y*a.y+a.z*a.z); }
 // Adaptively smooth the dashboard pointer. Small movements are steadied;
 // fast deliberate motion raises the cut-off to keep the ray responsive.
 struct AimSmoother {
@@ -75,7 +79,6 @@ V Unrotate(const vr::HmdMatrix34_t &m, V p) {
             m.m[0][1]*p.x+m.m[1][1]*p.y+m.m[2][1]*p.z,
             m.m[0][2]*p.x+m.m[1][2]*p.y+m.m[2][2]*p.z};
 }
-double Dot(V a, V b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
 bool Send(int fd, const char *message) {
     sockaddr_un addr;
     return sendto(fd, message, std::strlen(message), MSG_NOSIGNAL,
@@ -206,6 +209,8 @@ int main() {
     V sentOrigin{}, sentDirection{}, heldOrigin{}, heldDirection{};
     int64_t sentAt = 0;
     int heldOwner = -1;
+    std::optional<GrabRotation> grabRotation;
+    uint32_t grabHandId = 0;
     constexpr int64_t kClickHoldNs = 120'000'000ll;
     while (vr::VRSystem()->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd)) {
         const int64_t now = NowNs();
@@ -289,6 +294,7 @@ int main() {
             if (showing) Send(fd, "hide"), showing = false;
             claimAt = claimedAt = 0;
             heldOwner = -1;
+            grabRotation.reset();
             sentAt = 0;
             owner = pick;
         }
@@ -318,7 +324,7 @@ int main() {
                 double closestPlaneGap = 1e9, planeX = 0, planeY = 0, planeWidth = 0, planeHeight = 0;
                 std::string closestOverlay = "none";
                 V contactOrigin = tip - towardTip * 0.075, contactDir = towardTip;
-                if (touchOn && tipRange > 0.12 && !g.down) {
+                if (touchOn && tipRange > 0.12 && !g.down && !grabRotation) {
                     const V head = Position(poses[0].mDeviceToAbsoluteTracking);
                     const auto &rawHead = poses[0].mDeviceToAbsoluteTracking;
                     vr::ETrackingUniverseOrigin touchSpace = vr::VRCompositor()->GetTrackingSpace();
@@ -475,9 +481,20 @@ int main() {
                     (pending[owner] || (pressed && !touchPressed && now - pressAt < kClickHoldNs));
                 const V p = holdClick ? heldOrigin : liveOrigin;
                 const V d = holdClick ? heldDirection : liveDirection;
+                Quaternion rotation = AimRotation(d);
+                const auto palm = [&] {
+                    return PalmRotation(Point(h.p[0]), Point(h.p[5]), Point(h.p[9]), Point(h.p[17]));
+                };
+                if (grabRotation && !holdClick) {
+                    const double dt = std::clamp((now - sentAt) / 1e9, 0.0, 0.10);
+                    // Keep the last grab pose through release or a degenerate
+                    // palm sample. Reorient only while this hand holds the pinch.
+                    const auto trackedPalm = g.down && h.id == grabHandId ? palm() : std::nullopt;
+                    rotation = grabRotation->Step(trackedPalm, AimSmoother::Alpha(12.0, dt));
+                }
                 char pose[160];
-                std::snprintf(pose, sizeof pose, "pose %.5f %.5f %.5f %.3f %.3f", p.x, p.y, p.z,
-                              std::atan2(-d.x,-d.z)*180/M_PI, std::asin(std::clamp(d.y,-1.0,1.0))*180/M_PI);
+                std::snprintf(pose, sizeof pose, "posq %.5f %.5f %.5f %.8f %.8f %.8f %.8f",
+                              p.x, p.y, p.z, rotation.w, rotation.x, rotation.y, rotation.z);
                 Send(fd, pose);
                 sentOrigin = p; sentDirection = d; sentAt = now;
                 if (!showing) {
@@ -507,9 +524,22 @@ int main() {
                     now - claimedAt >= 60'000'000ll && pending[owner] &&
                     now-pending[owner] < 600'000'000ll) {
                     Send(fd, "btn trigger 1"); pressed = true; pressAt = now; pending[owner] = 0;
+                    // Outside the dashboard, a held pinch acts like a controller
+                    // grab. Anchor to the pose sent with trigger down so the
+                    // window keeps its starting orientation when picked up.
+                    if (!dashboard && g.down && g.handId == h.id) {
+                        grabRotation.emplace(rotation, palm());
+                        grabHandId = h.id;
+                    }
                 }
-                if (pressed && !touchPressed && (!g.down || now-g.beginNs > 4'000'000'000ll) && now-pressAt > 50'000'000ll)
-                    Send(fd, "btn trigger 0"), pressed = false, heldOwner = -1;
+                if (pressed && !touchPressed && (!g.down || now-g.beginNs > 4'000'000'000ll ||
+                    (grabRotation && h.id != grabHandId)) && now-pressAt > 50'000'000ll) {
+                    Send(fd, "btn trigger 0");
+                    pressed = false;
+                    heldOwner = -1;
+                    if (grabRotation) sentAt = 0; // the outgoing grab pose is not the hover ray
+                    grabRotation.reset();
+                }
             }
         }
         vr::VREvent_t event;
