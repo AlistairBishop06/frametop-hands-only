@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/c54dd16b-259a-4c39-ab1a-a1fc931f3f94
 
 - Shows tracked 3D hands in SteamVR, with eight colour presets and adjustable smoothing.
 - Lets you point, pinch to click, drag, and optionally touch supported dashboard panels with your fingertips.
-- Lets you pinch a floating window's grab handle and turn your wrist to reorient it with the dashboard closed.
+- Adds wrist rotation to pinch drags so SteamVR can tilt a floating window from its grab handle.
 - Provides a FrameHands dashboard panel to control tracking, hand visuals, touch, and updates.
 - Can pause tracking while a local VR game is active. Detection of PC-streamed games is not yet reliable.
 

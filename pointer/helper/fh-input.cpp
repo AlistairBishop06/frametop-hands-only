@@ -29,9 +29,9 @@ using pointer_pose::AimRotation;
 using pointer_pose::Dot;
 using pointer_pose::GrabRotation;
 using pointer_pose::Length;
-using pointer_pose::PalmRotation;
 using pointer_pose::Quaternion;
 using pointer_pose::V;
+using pointer_pose::WristRotation;
 int64_t NowNs() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
 V Position(const vr::HmdMatrix34_t &m) { return {m.m[0][3], m.m[1][3], m.m[2][3]}; }
 // Adaptively smooth the dashboard pointer. Small movements are steadied;
@@ -85,14 +85,28 @@ bool Send(int fd, const char *message) {
                   reinterpret_cast<sockaddr *>(&addr), ft_sock_addr(FT_SOCK_POINTER, &addr)) >= 0;
 }
 
-void ReportGrabRole(bool right) {
+void ReportGrabPose(bool right, bool dashboard, double wristAngle, Quaternion sent,
+                    const vr::TrackedDevicePose_t *poses) {
     const auto role = right ? vr::TrackedControllerRole_RightHand : vr::TrackedControllerRole_LeftHand;
     const auto device = vr::VRSystem()->GetTrackedDeviceIndexForControllerRole(role);
     char type[64]{};
-    if (device != vr::k_unTrackedDeviceIndexInvalid)
+    double poseError = -1;
+    if (device < vr::k_unMaxTrackedDeviceCount) {
         vr::VRSystem()->GetStringTrackedDeviceProperty(device, vr::Prop_ControllerType_String, type, sizeof type);
-    std::fprintf(stderr, "fh-input grab: %s hand role controller=%s\n",
-                 right ? "right" : "left", type[0] ? type : "unassigned");
+        if (poses[device].bPoseIsValid && !std::strcmp(type, "fh_pointer")) {
+            const auto &m = poses[device].mDeviceToAbsoluteTracking.m;
+            double trace = 0;
+            for (int i = 0; i < 3; ++i) {
+                const Quaternion axis{0, double(i == 0), double(i == 1), double(i == 2)};
+                const Quaternion expected = sent * axis * sent.Conjugate();
+                trace += Dot({m[0][i], m[1][i], m[2][i]}, {expected.x, expected.y, expected.z});
+            }
+            poseError = std::acos(std::clamp((trace - 1) / 2, -1.0, 1.0)) * 180 / M_PI;
+        }
+    }
+    std::fprintf(stderr, "fh-input grab: hand=%s dashboard=%d wrist=%.1fdeg controller=%s pose_error=%.1fdeg\n",
+                 right ? "right" : "left", int(dashboard), wristAngle * 180 / M_PI,
+                 type[0] ? type : "unassigned", poseError);
 }
 
 struct Controller {
@@ -222,7 +236,9 @@ int main() {
     int64_t sentAt = 0;
     int heldOwner = -1;
     std::optional<GrabRotation> grabRotation;
+    Quaternion sentRotation{1, 0, 0, 0};
     uint32_t grabHandId = 0;
+    int64_t nextGrabReport = 0;
     int64_t grabLockAt = 0;
     auto releaseGrabLock = [&] {
         if (grabLockAt) {
@@ -508,20 +524,27 @@ int main() {
                 const V p = holdClick ? heldOrigin : liveOrigin;
                 const V d = holdClick ? heldDirection : liveDirection;
                 Quaternion rotation = AimRotation(d);
-                const auto palm = [&] {
-                    return PalmRotation(Point(h.p[0]), Point(h.p[5]), Point(h.p[9]), Point(h.p[17]));
+                const auto wrist = [&] {
+                    if (const auto fitted = WristRotation(Point(h.wristForward), Point(h.wristRight)))
+                        return fitted;
+                    const V across = Point(h.p[17]) - Point(h.p[5]);
+                    return WristRotation(Point(h.p[9]) - Point(h.p[0]), h.right ? across : across * -1);
                 };
                 if (grabRotation && !holdClick) {
                     const double dt = std::clamp((now - sentAt) / 1e9, 0.0, 0.10);
-                    // Keep the last grab pose through release or a degenerate
-                    // palm sample. Reorient only while this hand holds the pinch.
-                    const auto trackedPalm = g.down && h.id == grabHandId ? palm() : std::nullopt;
-                    rotation = grabRotation->Step(trackedPalm, AimSmoother::Alpha(12.0, dt));
+                    // Keep the last wrist contribution if a sample is missing.
+                    const auto trackedWrist = g.down && h.id == grabHandId ? wrist() : std::nullopt;
+                    rotation = grabRotation->Step(rotation, trackedWrist, AimSmoother::Alpha(12.0, dt));
+                    if (debug && now >= nextGrabReport) {
+                        ReportGrabPose(h.right, dashboard, grabRotation->WristAngle(), sentRotation, poses);
+                        nextGrabReport = now + 500'000'000ll;
+                    }
                 }
                 char pose[160];
                 std::snprintf(pose, sizeof pose, "posq %.5f %.5f %.5f %.8f %.8f %.8f %.8f",
                               p.x, p.y, p.z, rotation.w, rotation.x, rotation.y, rotation.z);
                 Send(fd, pose);
+                sentRotation = rotation;
                 sentOrigin = p; sentDirection = d; sentAt = now;
                 if (!showing) {
                     Send(fd, owner ? "role right" : "role left");
@@ -549,20 +572,23 @@ int main() {
                 if (showing && !pressed && !claimAt && claimedAt &&
                     now - claimedAt >= 60'000'000ll && pending[owner] &&
                     now-pending[owner] < 600'000'000ll) {
-                    const bool grabbing = !dashboard && g.down && g.handId == h.id;
-                    if (!grabbing) releaseGrabLock();
-                    if (grabbing && !grabLockAt) {
+                    // Floated windows can be grabbed even when SteamVR says
+                    // the dashboard is visible. That flag only gates mouse lock.
+                    const bool grabbing = g.down && g.handId == h.id;
+                    const bool lockGrab = grabbing && !dashboard;
+                    if (!lockGrab) releaseGrabLock();
+                    if (lockGrab && !grabLockAt) {
                         if (Send(fd, "btn grab_lock 1")) grabLockAt = now;
-                    } else if (!grabbing || now - grabLockAt >= kGrabLockLeadNs) {
+                    } else if (!lockGrab || now - grabLockAt >= kGrabLockLeadNs) {
                         if (Send(fd, "btn trigger 1")) {
                             pressed = true;
                             pressAt = now;
                             pending[owner] = 0;
-                            // Anchor wrist motion to the pose sent with trigger down.
+                            // Measure wrist motion relative to trigger down.
                             if (grabbing) {
-                                grabRotation.emplace(rotation, palm());
+                                grabRotation.emplace(wrist());
                                 grabHandId = h.id;
-                                if (debug) ReportGrabRole(h.right);
+                                nextGrabReport = 0;
                             }
                         }
                     }

@@ -67,6 +67,8 @@ struct Hand {
     float confidence = 0;
     int64_t captureNs = 0;    // CLOCK_MONOTONIC: when the cameras saw it
     float p[21][3];           // the joints (MediaPipe's landmark order)
+    float wristForward[3]{};  // fitted wrist's -Z axis, in the room; zero if unavailable
+    float wristRight[3]{};    // fitted wrist's +X axis, in the room
     float radius[21];         // rough radii (version 1: the skeleton's defaults)
     float bone[20];           // bone b ends at joint b + 1 (version 1: from the points)
     float elbow[3];           // the arm model's elbow (version 1: on the hand's axis)

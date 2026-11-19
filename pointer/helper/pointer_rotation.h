@@ -37,18 +37,14 @@ inline Quaternion AimRotation(V direction) {
     return {cy*cp, cy*sp, sy*cp, -sy*sp};
 }
 
-inline std::optional<Quaternion> PalmRotation(V wrist, V index, V middle, V little) {
-    V forward = middle - wrist;
+inline std::optional<Quaternion> WristRotation(V forward, V across) {
     const double palmLength = Length(forward);
     if (!std::isfinite(palmLength) || palmLength < 0.02) return std::nullopt;
     forward = forward * (1.0 / palmLength);
-    const V across = index - little;
     const V right = across - forward * Dot(across, forward);
     const double palmWidth = Length(right);
     if (!std::isfinite(palmWidth) || palmWidth < 0.02) return std::nullopt;
-    // Compare the palm's across-knuckles axis with the zero-roll frame.
-    // This axis has a different anatomical sign on opposing hands. The sign
-    // cancels when computing rotation relative to the same hand at grab start.
+    // Compare the wrist's right axis with the zero-roll aiming frame.
     const double yaw = std::atan2(-forward.x, -forward.z);
     const V aimRight{std::cos(yaw), 0, -std::sin(yaw)};
     const V aimUp = Cross(forward * -1, aimRight);
@@ -69,21 +65,23 @@ inline Quaternion BlendRotation(Quaternion from, Quaternion to, double alpha) {
 
 class GrabRotation {
 public:
-    GrabRotation(Quaternion pointer, std::optional<Quaternion> palm) : rotation_(pointer) {
-        if (palm) pointerInPalm_ = palm->Conjugate() * pointer;
+    explicit GrabRotation(std::optional<Quaternion> wrist) : start_(wrist) {}
+
+    Quaternion Step(Quaternion aim, std::optional<Quaternion> wrist, double alpha) {
+        if (wrist) {
+            if (!start_) start_ = wrist;
+            delta_ = BlendRotation(delta_, *wrist * start_->Conjugate(), alpha);
+        }
+        // Translation can still steer a drag as it did before. The wrist
+        // contributes an independent rotation relative to the pinch start.
+        return delta_ * aim;
     }
 
-    Quaternion Step(std::optional<Quaternion> palm, double alpha) {
-        if (palm) {
-            if (!pointerInPalm_) pointerInPalm_ = palm->Conjugate() * rotation_;
-            rotation_ = BlendRotation(rotation_, *palm * *pointerInPalm_, alpha);
-        }
-        return rotation_;
-    }
+    double WristAngle() const { return 2 * std::acos(std::clamp(std::abs(delta_.w), 0.0, 1.0)); }
 
 private:
-    Quaternion rotation_;
-    std::optional<Quaternion> pointerInPalm_;
+    Quaternion delta_{1, 0, 0, 0};
+    std::optional<Quaternion> start_;
 };
 
 }  // namespace pointer_pose
