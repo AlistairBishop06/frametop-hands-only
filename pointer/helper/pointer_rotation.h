@@ -74,6 +74,17 @@ struct PointerPose {
     Quaternion rotation;
 };
 
+inline V Rotate(Quaternion q, V v) {
+    const Quaternion result = q * Quaternion{0, v.x, v.y, v.z} * q.Conjugate();
+    return {result.x, result.y, result.z};
+}
+
+// OpenVR pose components are offsets from the tracked device's pose.
+inline PointerPose RelativePose(PointerPose device, PointerPose laser) {
+    const Quaternion inverse = device.rotation.Conjugate();
+    return {Rotate(inverse, laser.origin - device.origin), inverse * laser.rotation};
+}
+
 class GrabPose {
 public:
     GrabPose(PointerPose start, std::optional<Quaternion> wrist) : pose_(start), wristStart_(wrist) {}

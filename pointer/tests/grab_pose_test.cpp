@@ -9,6 +9,14 @@ static Quaternion Roll(double radians) {
     return {std::cos(radians / 2), 0, 0, std::sin(radians / 2)};
 }
 
+static void CheckLaser(PointerPose device, PointerPose laser) {
+    const auto offset = RelativePose(device, laser);
+    const auto origin = device.origin + Rotate(device.rotation, offset.origin);
+    const auto rotation = device.rotation * offset.rotation;
+    assert(Length(origin - laser.origin) < 1e-8);
+    assert(RotationDistance(rotation, laser.rotation) < 1e-6);
+}
+
 int main() {
     const Quaternion neutral = Roll(0);
     const PointerPose start{{0, 0, 0}, neutral};
@@ -46,8 +54,13 @@ int main() {
     assert(RotationDistance(frozen.rotation, last.rotation) < 1e-6);
     assert(!grab.HoldingRelease(mouseUp + 250'000'000));
 
+    // The laser still sees the new aim while the window sees its frozen pose.
+    CheckLaser(frozen, start);
+    CheckLaser(frozen, {{0.4, -0.1, 0.3}, AimRotation({0.48, -0.36, -0.8})});
+    CheckLaser(target, target);
+
     GrabPose tap(start, neutral);
     tap.Release(mouseUp);
     assert(!tap.HoldingRelease(mouseUp));
-    std::cout << "Grab smoothing and release pose checks passed\n";
+    std::cout << "Grab smoothing, release, and independent laser pose checks passed\n";
 }
