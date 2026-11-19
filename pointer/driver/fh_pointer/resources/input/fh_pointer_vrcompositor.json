@@ -12,6 +12,33 @@
 		"/actions/lasermouse": {
 			"sources": [
 				{
+					"path": "/user/hand/left/input/grab_lock",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/LockMousePosition"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/right/input/grab_lock",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/LockMousePosition"
+						}
+					}
+				},
+				{
+					"path": "/user/treadmill/input/grab_lock",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/LockMousePosition"
+						}
+					}
+				},
+				{
 					"path": "/user/hand/left/input/trigger",
 					"mode": "button",
 					"inputs": {

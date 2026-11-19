@@ -121,6 +121,19 @@ class ControlTests(unittest.TestCase):
         secondary = bindings["/actions/lasermouse_secondary"]["sources"]
         self.assertFalse(any(source["path"].endswith("/trigger") for source in secondary))
 
+    def test_grab_lock_and_regular_click_use_separate_inputs(self):
+        directory = ROOT / "pointer/driver/fh_pointer/resources/input"
+        profile = json.loads((directory / "fh_pointer_profile.json").read_text())
+        self.assertTrue(profile["input_source"]["/input/grab_lock"]["click"])
+        bindings = json.loads((directory / "fh_pointer_vrcompositor.json").read_text())["bindings"]
+        laser = bindings["/actions/lasermouse"]["sources"]
+        for role in ("/user/hand/left", "/user/hand/right", "/user/treadmill"):
+            with self.subTest(role=role):
+                for source, action in (("grab_lock", "LockMousePosition"), ("trigger", "leftclick")):
+                    outputs = [entry["inputs"]["click"]["output"] for entry in laser
+                               if entry["path"] == f"{role}/input/{source}"]
+                    self.assertEqual(outputs, [f"/actions/lasermouse/in/{action}"])
+
     def test_watchdog_is_only_enabled_when_tracking_is_autostarted(self):
         from types import SimpleNamespace
         commands=[]

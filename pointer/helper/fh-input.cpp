@@ -84,6 +84,17 @@ bool Send(int fd, const char *message) {
     return sendto(fd, message, std::strlen(message), MSG_NOSIGNAL,
                   reinterpret_cast<sockaddr *>(&addr), ft_sock_addr(FT_SOCK_POINTER, &addr)) >= 0;
 }
+
+void ReportGrabRole(bool right) {
+    const auto role = right ? vr::TrackedControllerRole_RightHand : vr::TrackedControllerRole_LeftHand;
+    const auto device = vr::VRSystem()->GetTrackedDeviceIndexForControllerRole(role);
+    char type[64]{};
+    if (device != vr::k_unTrackedDeviceIndexInvalid)
+        vr::VRSystem()->GetStringTrackedDeviceProperty(device, vr::Prop_ControllerType_String, type, sizeof type);
+    std::fprintf(stderr, "fh-input grab: %s hand role controller=%s\n",
+                 right ? "right" : "left", type[0] ? type : "unassigned");
+}
+
 struct Controller {
     V last{};
     int64_t at = 0, busyUntil = 0;
@@ -192,6 +203,7 @@ int main() {
     bool floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
     bool touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
     bool touchDebug = handcut::Setting("HANDS_TOUCH_DEBUG", "0") == "1";
+    bool debug = handcut::Setting("DEBUG", "0") == "1";
     int smoothness = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
     int64_t nextSettings = 0;
     int64_t nextOverlayScan = 0;
@@ -211,6 +223,15 @@ int main() {
     int heldOwner = -1;
     std::optional<GrabRotation> grabRotation;
     uint32_t grabHandId = 0;
+    int64_t grabLockAt = 0;
+    auto releaseGrabLock = [&] {
+        if (grabLockAt) {
+            Send(fd, "btn grab_lock 0");
+            grabLockAt = 0;
+        }
+    };
+    // The physical trigger engages SteamVR's mouse lock before its click.
+    constexpr int64_t kGrabLockLeadNs = 30'000'000ll;
     constexpr int64_t kClickHoldNs = 120'000'000ll;
     while (vr::VRSystem()->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd)) {
         const int64_t now = NowNs();
@@ -232,6 +253,7 @@ int main() {
             floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
             touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
             touchDebug = handcut::Setting("HANDS_TOUCH_DEBUG", "0") == "1";
+            debug = handcut::Setting("DEBUG", "0") == "1";
             smoothness = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
         }
         vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
@@ -291,6 +313,7 @@ int main() {
             if (pick < 0) pending[0] = pending[1] = 0;
             aim.Reset();  // never interpolate a ray between different hands
             if (pressed) Send(fd, "btn trigger 0"), pressed = touchPressed = false;
+            releaseGrabLock();
             if (showing) Send(fd, "hide"), showing = false;
             claimAt = claimedAt = 0;
             heldOwner = -1;
@@ -470,7 +493,10 @@ int main() {
                 const V liveDirection = smoothPointer && !touchAim ? aim.direction : aimDir;
                 if (pending[owner] && now - pending[owner] >= 600'000'000ll) {
                     pending[owner] = 0;
-                    if (!pressed) heldOwner = -1;
+                    if (!pressed) {
+                        heldOwner = -1;
+                        releaseGrabLock();
+                    }
                 }
                 if (pending[owner] && heldOwner != owner && !touchAim) {
                     heldOrigin = liveOrigin;
@@ -509,7 +535,7 @@ int main() {
                     claimAt = 0;
                     claimedAt = now;
                 }
-                if (showing && !pressed && touchOn && touching && now >= touchReleaseAt) {
+                if (showing && !pressed && !grabLockAt && touchOn && touching && now >= touchReleaseAt) {
                     Send(fd, "btn trigger 1"); pressed = touchPressed = true; pressAt = now;
                 }
                 if (touchPressed) {
@@ -523,18 +549,28 @@ int main() {
                 if (showing && !pressed && !claimAt && claimedAt &&
                     now - claimedAt >= 60'000'000ll && pending[owner] &&
                     now-pending[owner] < 600'000'000ll) {
-                    Send(fd, "btn trigger 1"); pressed = true; pressAt = now; pending[owner] = 0;
-                    // Outside the dashboard, a held pinch acts like a controller
-                    // grab. Anchor to the pose sent with trigger down so the
-                    // window keeps its starting orientation when picked up.
-                    if (!dashboard && g.down && g.handId == h.id) {
-                        grabRotation.emplace(rotation, palm());
-                        grabHandId = h.id;
+                    const bool grabbing = !dashboard && g.down && g.handId == h.id;
+                    if (!grabbing) releaseGrabLock();
+                    if (grabbing && !grabLockAt) {
+                        if (Send(fd, "btn grab_lock 1")) grabLockAt = now;
+                    } else if (!grabbing || now - grabLockAt >= kGrabLockLeadNs) {
+                        if (Send(fd, "btn trigger 1")) {
+                            pressed = true;
+                            pressAt = now;
+                            pending[owner] = 0;
+                            // Anchor wrist motion to the pose sent with trigger down.
+                            if (grabbing) {
+                                grabRotation.emplace(rotation, palm());
+                                grabHandId = h.id;
+                                if (debug) ReportGrabRole(h.right);
+                            }
+                        }
                     }
                 }
                 if (pressed && !touchPressed && (!g.down || now-g.beginNs > 4'000'000'000ll ||
                     (grabRotation && h.id != grabHandId)) && now-pressAt > 50'000'000ll) {
                     Send(fd, "btn trigger 0");
+                    releaseGrabLock();
                     pressed = false;
                     heldOwner = -1;
                     if (grabRotation) sentAt = 0; // the outgoing grab pose is not the hover ray
@@ -562,7 +598,9 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(12));
     }
 done:
-    Send(fd, "btn trigger 0"); Send(fd, "hide");
+    Send(fd, "btn trigger 0");
+    releaseGrabLock();
+    Send(fd, "hide");
     close(fd);
     vr::VR_Shutdown();
     return 0;

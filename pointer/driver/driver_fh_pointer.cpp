@@ -24,6 +24,9 @@ using namespace vr;
 
 namespace {
 
+constexpr const char *kButtonNames[] = {"trigger", "b", "x", "system", "joystick", "a", "grab_lock"};
+constexpr int kButtons = sizeof kButtonNames / sizeof kButtonNames[0];
+
 struct State {
     std::mutex lock;
     std::chrono::steady_clock::time_point lastCommand = std::chrono::steady_clock::now();
@@ -34,16 +37,13 @@ struct State {
     float quat[4] = {1, 0, 0, 0};
 
     float yaw = 0.f, pitch = 0.f;  // degrees
-    bool buttons[6] = {};
+    bool buttons[kButtons] = {};
     // A press the frame didn't send yet. A short tap's release can come before the next frame, and
     // SteamVR never sees a press that went up between two frames: the frame sends it, the next one the release.
-    bool pressed[6] = {};
+    bool pressed[kButtons] = {};
     int32_t role = 0;  // "role": the hint while connected; 0 = the configured one
     float scrollX = 0.f, scrollY = 0.f;
 };
-
-const int kButtons = 6;
-const char *kButtonNames[kButtons] = {"trigger", "b", "x", "system", "joystick", "a"};
 
 HmdQuaternion_t QuatFromYawPitch(float yawDeg, float pitchDeg) {
     // Yaw about +Y, then pitch about +X. SteamVR forward is -Z.
@@ -106,6 +106,7 @@ public:
         input->CreateBooleanComponent(c, "/input/system/click", &buttons_[3]);
         input->CreateBooleanComponent(c, "/input/joystick/click", &buttons_[4]);
         input->CreateBooleanComponent(c, "/input/a/click", &buttons_[5]);
+        input->CreateBooleanComponent(c, "/input/grab_lock/click", &buttons_[6]);
         input->CreateScalarComponent(c, "/input/joystick/x", &scrollX_, VRScalarType_Absolute, VRScalarUnits_NormalizedTwoSided);
         input->CreateScalarComponent(c, "/input/joystick/y", &scrollY_, VRScalarType_Absolute, VRScalarUnits_NormalizedTwoSided);
 
@@ -144,7 +145,7 @@ public:
             snapshot.visible = state_->visible;
             snapshot.yaw = state_->yaw;
             snapshot.pitch = state_->pitch;
-            for (int i = 0; i < 6; ++i) {
+            for (int i = 0; i < kButtons; ++i) {
                 snapshot.buttons[i] = state_->buttons[i] || state_->pressed[i];
                 state_->pressed[i] = false;
             }
