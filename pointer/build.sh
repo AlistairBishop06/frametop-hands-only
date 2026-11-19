@@ -2,8 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p build/include
-. ../scripts/openvr.sh
 cxx=${CXX:-g++}
+"$cxx" -std=c++17 -O2 -Wall -o build/grab-pose-test tests/grab_pose_test.cpp
+build/grab-pose-test
+. ../scripts/openvr.sh
 "$cxx" -std=c++17 -O2 -fPIC -shared -fvisibility=hidden -fno-math-errno \
   -static-libstdc++ -static-libgcc -Wall -Wno-unused-parameter -Ibuild/include \
   -o build/driver_fh_pointer.so driver/driver_fh_pointer.cpp -lpthread

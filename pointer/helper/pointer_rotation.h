@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 
 namespace pointer_pose {
@@ -63,25 +64,57 @@ inline Quaternion BlendRotation(Quaternion from, Quaternion to, double alpha) {
     return {q.w/n, q.x/n, q.y/n, q.z/n};
 }
 
-class GrabRotation {
-public:
-    explicit GrabRotation(std::optional<Quaternion> wrist) : start_(wrist) {}
+inline double RotationDistance(Quaternion a, Quaternion b) {
+    const double dot = a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z;
+    return 2 * std::acos(std::clamp(std::abs(dot), 0.0, 1.0));
+}
 
-    Quaternion Step(Quaternion aim, std::optional<Quaternion> wrist, double alpha) {
+struct PointerPose {
+    V origin;
+    Quaternion rotation;
+};
+
+class GrabPose {
+public:
+    GrabPose(PointerPose start, std::optional<Quaternion> wrist) : pose_(start), wristStart_(wrist) {}
+
+    PointerPose Step(PointerPose aim, std::optional<Quaternion> wrist, double dt) {
+        if (releaseUntil_) return pose_;
         if (wrist) {
-            if (!start_) start_ = wrist;
-            delta_ = BlendRotation(delta_, *wrist * start_->Conjugate(), alpha);
+            if (!wristStart_) wristStart_ = wrist;
+            wristDelta_ = *wrist * wristStart_->Conjugate();
         }
-        // Translation can still steer a drag as it did before. The wrist
-        // contributes an independent rotation relative to the pinch start.
-        return delta_ * aim;
+        // Smooth the full pose: angular jitter also moves a distant window
+        // sideways. Raise the cutoff for a deliberate move or turn.
+        const V offset = aim.origin - pose_.origin;
+        const Quaternion rotation = wristDelta_ * aim.rotation;
+        const double positionHz = std::min(1.6 + 12.0 * Length(offset), 5.0);
+        const double rotationHz = std::min(1.5 + 4.0 * RotationDistance(pose_.rotation, rotation), 5.0);
+        const auto alpha = [dt](double hz) {
+            return -std::expm1(-6.283185307179586 * hz * std::clamp(dt, 0.0, 0.05));
+        };
+        pose_.origin = pose_.origin + offset * alpha(positionHz);
+        pose_.rotation = BlendRotation(pose_.rotation, rotation, alpha(rotationHz));
+        hasDragged_ = true;
+        return pose_;
     }
 
-    double WristAngle() const { return 2 * std::acos(std::clamp(std::abs(delta_.w), 0.0, 1.0)); }
+    void Release(int64_t now) {
+        // SteamVR can wait 150 ms after mouse-up before it samples the
+        // controller to place the window. Leave room for event delivery.
+        if (hasDragged_) releaseUntil_ = now + 250'000'000;
+    }
+    bool Released() const { return releaseUntil_ != 0; }
+    bool HoldingRelease(int64_t now) const { return Released() && now < releaseUntil_; }
+    const PointerPose &Pose() const { return pose_; }
+    double WristAngle() const { return RotationDistance({1, 0, 0, 0}, wristDelta_); }
 
 private:
-    Quaternion delta_{1, 0, 0, 0};
-    std::optional<Quaternion> start_;
+    PointerPose pose_;
+    Quaternion wristDelta_{1, 0, 0, 0};
+    std::optional<Quaternion> wristStart_;
+    bool hasDragged_ = false;
+    int64_t releaseUntil_ = 0;
 };
 
 }  // namespace pointer_pose
