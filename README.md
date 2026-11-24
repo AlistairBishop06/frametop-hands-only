@@ -17,8 +17,6 @@ https://github.com/user-attachments/assets/5018c196-aec9-4d24-bae9-d963316f9b3a
 - Provides a FrameHands dashboard panel to control tracking, hand visuals, touch, and updates.
 - Can pause tracking while a local VR game is active. Detection of PC-streamed games is not yet reliable.
 
-FrameHands does not yet provide native hand controls or skeletal input to VR games such as *Half-Life: Alyx*.
-
 ## Install
 
 On a **Steam Frame** running ARM64 SteamOS, open Konsole in the logged-in steamos session. You need your `sudo` password. Run the installer as `steamos`, not with `sudo`:
