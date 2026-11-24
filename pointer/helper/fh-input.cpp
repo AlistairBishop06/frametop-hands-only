@@ -1,7 +1,8 @@
 // Dashboard and undocked-panel pointer. The SteamVR driver remains disconnected
-// until a bare hand is pointing at the dashboard; no game input is synthesized.
+// until a bare hand is available for overlay input; no game input is synthesized.
 #include "../../config/ftsock.h"
 #include "../../renderer/handcut.h"
+#include "pointer_aim.h"
 
 #include <openvr.h>
 #include <sys/socket.h>
@@ -16,6 +17,7 @@
 #include <thread>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -23,42 +25,20 @@
 
 namespace {
 using Clock = std::chrono::steady_clock;
+using pointer_pose::AimMoved;
+using pointer_pose::AimRay;
+using pointer_pose::AimRotation;
+using pointer_pose::Dot;
+using pointer_pose::GrabPose;
+using pointer_pose::GrabSample;
+using pointer_pose::HandAim;
+using pointer_pose::Length;
+using pointer_pose::PointerPose;
+using pointer_pose::Quaternion;
+using pointer_pose::V;
+using pointer_pose::WristRotation;
 int64_t NowNs() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
-struct V { double x, y, z; };
 V Position(const vr::HmdMatrix34_t &m) { return {m.m[0][3], m.m[1][3], m.m[2][3]}; }
-V operator-(V a, V b) { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
-V operator+(V a, V b) { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
-V operator*(V a, double k) { return {a.x*k, a.y*k, a.z*k}; }
-double Length(V a) { return std::sqrt(a.x*a.x+a.y*a.y+a.z*a.z); }
-// Adaptively smooth the dashboard pointer. Small movements are steadied;
-// fast deliberate motion raises the cut-off to keep the ray responsive.
-struct AimSmoother {
-    V origin{}, direction{};
-    double originSpeed = 0, directionSpeed = 0;
-    int64_t last = 0;
-    static double Alpha(double hz, double dt) { return 1.0 - std::exp(-2.0 * M_PI * hz * dt); }
-    static V Smooth(V raw, V filtered, double &speed, double dt, double gain, double base) {
-        const V delta = raw - filtered;
-        speed += (Length(delta) / dt - speed) * Alpha(1.5, dt);
-        return filtered + delta * Alpha(std::clamp(base + gain * speed, base, 40.0), dt);
-    }
-    void Reset() { last = 0; originSpeed = directionSpeed = 0; }
-    void Step(V p, V d, int64_t now, int smoothness) {
-        if (!last || now <= last || now - last > 250'000'000ll) {
-            origin = p; direction = d; originSpeed = directionSpeed = 0;
-        } else {
-            const double dt = std::clamp((now - last) / 1e9, 0.002, 0.10);
-            // At 50 the original 2.5 Hz steady-hand cut-off is preserved.
-            // Movement still raises the cutoff so deliberate aiming responds.
-            const double base = 12.0 * std::exp(-3.14 * std::clamp(smoothness, 0, 100) / 100.0);
-            origin = Smooth(p, origin, originSpeed, dt, 25.0, base);
-            direction = Smooth(d, direction, directionSpeed, dt, 12.0, base);
-            const double n = Length(direction);
-            direction = n > 1e-6 ? direction * (1.0 / n) : d;
-        }
-        last = now;
-    }
-};
 V Point(const float p[3]) { return {p[0], p[1], p[2]}; }
 V Local(const vr::HmdMatrix34_t &m, V p) {
     return {m.m[0][3]+m.m[0][0]*p.x+m.m[0][1]*p.y+m.m[0][2]*p.z,
@@ -75,12 +55,48 @@ V Unrotate(const vr::HmdMatrix34_t &m, V p) {
             m.m[0][1]*p.x+m.m[1][1]*p.y+m.m[2][1]*p.z,
             m.m[0][2]*p.x+m.m[1][2]*p.y+m.m[2][2]*p.z};
 }
-double Dot(V a, V b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
 bool Send(int fd, const char *message) {
     sockaddr_un addr;
     return sendto(fd, message, std::strlen(message), MSG_NOSIGNAL,
                   reinterpret_cast<sockaddr *>(&addr), ft_sock_addr(FT_SOCK_POINTER, &addr)) >= 0;
 }
+
+void SendPoses(int fd, const PointerPose &laser, const PointerPose &device) {
+    const auto &l = laser.origin;
+    const auto &q = laser.rotation;
+    const auto &p = device.origin;
+    const auto &r = device.rotation;
+    char command[256];
+    std::snprintf(command, sizeof command,
+                  "posq %.5f %.5f %.5f %.8f %.8f %.8f %.8f %.5f %.5f %.5f %.8f %.8f %.8f %.8f",
+                  l.x, l.y, l.z, q.w, q.x, q.y, q.z, p.x, p.y, p.z, r.w, r.x, r.y, r.z);
+    Send(fd, command);
+}
+
+void ReportGrabPose(bool right, bool dashboard, double wristAngle, Quaternion sent,
+                    const vr::TrackedDevicePose_t *poses) {
+    const auto role = right ? vr::TrackedControllerRole_RightHand : vr::TrackedControllerRole_LeftHand;
+    const auto device = vr::VRSystem()->GetTrackedDeviceIndexForControllerRole(role);
+    char type[64]{};
+    double poseError = -1;
+    if (device < vr::k_unMaxTrackedDeviceCount) {
+        vr::VRSystem()->GetStringTrackedDeviceProperty(device, vr::Prop_ControllerType_String, type, sizeof type);
+        if (poses[device].bPoseIsValid && !std::strcmp(type, "fh_pointer")) {
+            const auto &m = poses[device].mDeviceToAbsoluteTracking.m;
+            double trace = 0;
+            for (int i = 0; i < 3; ++i) {
+                const Quaternion axis{0, double(i == 0), double(i == 1), double(i == 2)};
+                const Quaternion expected = sent * axis * sent.Conjugate();
+                trace += Dot({m[0][i], m[1][i], m[2][i]}, {expected.x, expected.y, expected.z});
+            }
+            poseError = std::acos(std::clamp((trace - 1) / 2, -1.0, 1.0)) * 180 / M_PI;
+        }
+    }
+    std::fprintf(stderr, "fh-input grab: hand=%s dashboard=%d wrist=%.1fdeg controller=%s pose_error=%.1fdeg\n",
+                 right ? "right" : "left", int(dashboard), wristAngle * 180 / M_PI,
+                 type[0] ? type : "unassigned", poseError);
+}
+
 struct Controller {
     V last{};
     int64_t at = 0, busyUntil = 0;
@@ -183,13 +199,16 @@ int main() {
     const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return std::perror("fh-input socket"), 1;
     handcut::Hands hands;
+    HandAim aim;
     Controller controllers[vr::k_unMaxTrackedDeviceCount]{};
-    AimSmoother aim;
-    bool smoothPointer = handcut::Setting("HANDS_POINTER_SMOOTH", "1") != "0";
     bool floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
     bool touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
     bool touchDebug = handcut::Setting("HANDS_TOUCH_DEBUG", "0") == "1";
-    int smoothness = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
+    bool debug = handcut::Setting("DEBUG", "0") == "1";
+    auto pointerSmoothness = [] {
+        return std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
+    };
+    int smoothness = pointerSmoothness();
     int64_t nextSettings = 0;
     int64_t nextOverlayScan = 0;
     std::vector<std::string> overlayKeys;
@@ -200,13 +219,48 @@ int main() {
     int owner = -1;
     bool showing = false, pressed = false, initialized[2]{}, wasDashboard = false;
     uint32_t begins[2]{};
+    uint32_t pendingHand[2]{};
     int64_t pressAt = 0, pending[2]{}, seenSince[2]{}, claimAt = 0, claimedAt = 0;
     // Hold the last displayed ray through the pinch click, then let a drag
     // follow the hand. This is independent of the target overlay's flags.
-    V sentOrigin{}, sentDirection{}, heldOrigin{}, heldDirection{};
+    PointerPose sentLaser{{}, {1, 0, 0, 0}};
+    AimRay heldAim{};
     int64_t sentAt = 0;
     int heldOwner = -1;
-    constexpr int64_t kClickHoldNs = 120'000'000ll;
+    uint32_t sentHandId = 0;
+    bool clickDragging = false;
+    int64_t clickReleaseUntil = 0;
+    std::optional<GrabPose> grabPose;
+    Quaternion sentRotation{1, 0, 0, 0};
+    uint32_t grabHandId = 0;
+    bool grabUsesFittedWrist = false;
+    int64_t nextGrabReport = 0;
+    int64_t grabLockAt = 0;
+    auto releaseGrabLock = [&] {
+        if (grabLockAt) {
+            Send(fd, "btn grab_lock 0");
+            grabLockAt = 0;
+        }
+    };
+    auto releasePinch = [&](int64_t now) {
+        Send(fd, "btn trigger 0");
+        releaseGrabLock();
+        pressed = false;
+        if (!clickDragging && heldOwner == owner) clickReleaseUntil = now + 45'000'000ll;
+        else heldOwner = -1;
+        clickDragging = false;
+        if (grabPose) {
+            grabPose->Release(now);
+            if (!grabPose->Released()) grabPose.reset();
+        }
+    };
+    // The physical trigger engages SteamVR's mouse lock before its click.
+    constexpr int64_t kGrabLockLeadNs = 30'000'000ll;
+    constexpr int64_t kClickHoldNs = 55'000'000ll;
+    constexpr int64_t kGrabStartHoldNs = 35'000'000ll;
+    constexpr int64_t kGestureStaleNs = 300'000'000ll;
+    constexpr int64_t kAimLossHoldNs = 100'000'000ll;
+    constexpr int64_t kPendingTimeoutNs = 600'000'000ll;
     while (vr::VRSystem()->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd)) {
         const int64_t now = NowNs();
         if (touchOn && now >= nextOverlayScan) {
@@ -223,11 +277,11 @@ int main() {
         }
         if (now >= nextSettings) {
             nextSettings = now + 750'000'000ll;
-            smoothPointer = handcut::Setting("HANDS_POINTER_SMOOTH", "1") != "0";
             floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
             touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
             touchDebug = handcut::Setting("HANDS_TOUCH_DEBUG", "0") == "1";
-            smoothness = std::clamp(std::atoi(handcut::Setting("HANDS_SMOOTHNESS", "50").c_str()), 0, 100);
+            debug = handcut::Setting("DEBUG", "0") == "1";
+            smoothness = pointerSmoothness();
         }
         vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
         vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0,
@@ -237,7 +291,9 @@ int main() {
         wasDashboard = dashboard;
         const bool fresh = poses[0].bPoseIsValid && hands.Update(poses[0].mDeviceToAbsoluteTracking, now);
         const handcut::Hand *side[2]{};
+        const handcut::Hand *measured[2]{};
         if (fresh) for (const auto &h : hands.shown()) side[h.right ? 1 : 0] = &h;
+        if (fresh) for (const auto &h : hands.seen()) measured[h.right ? 1 : 0] = &h;
         bool ready[2]{};
         for (int s = 0; s < 2; ++s) {
             const auto &g = hands.pinch(s);
@@ -246,17 +302,34 @@ int main() {
             else if (!seenSince[s]) seenSince[s] = now;
             // Stereo depth is best, but a stable one-camera hand is sufficient
             // for a dashboard ray. Direct Touch still uses its own contact test.
-            const bool located = side[s] && (side[s]->stereo || now - seenSince[s] >= 250'000'000ll);
-            if ((dashboard || floatPointer) && located && !hands.grip(s).down) {
+            const bool recentlyAimed = s == owner && side[s] && side[s]->id == sentHandId &&
+                                      sentAt && now - sentAt < kAimLossHoldNs;
+            const bool located = side[s] && (side[s]->stereo || recentlyAimed || now - seenSince[s] >= 250'000'000ll);
+            if ((dashboard || floatPointer) && located && measured[s] && !hands.grip(s).down) {
                 const auto &headPose = poses[0].mDeviceToAbsoluteTracking;
-                const V knuckle = (Point(side[s]->p[5])+Point(side[s]->p[9]))*0.5;
+                const V knuckle = (Point(measured[s]->p[5])+Point(measured[s]->p[9]))*0.5;
                 const V fromHead = knuckle-Position(headPose);
                 const V forward{-headPose.m[0][2],-headPose.m[1][2],-headPose.m[2][2]};
-                ready[s] = Dot(fromHead, forward) > 0.22 && fromHead.y > -0.45 &&
+                ready[s] = Dot(fromHead, forward) > (s == owner ? 0.16 : 0.22) &&
+                           fromHead.y > (s == owner ? -0.50 : -0.45) &&
                            !PhysicalControllerBusy(poses, *side[s], controllers, now);
             }
         }
         int pick = owner >= 0 && ready[owner] ? owner : ready[1] ? 1 : ready[0] ? 0 : -1;
+        if (grabPose && grabPose->Released() && !grabPose->HoldingRelease(now))
+            grabPose.reset();
+        if (pressed && grabPose) {
+            const auto &g = hands.pinch(owner);
+            const bool pinchEnded = !g.down || g.handId != grabHandId || now - g.captureNs > kGestureStaleNs;
+            // Keep a live drag attached past the timeout for an idle press.
+            const bool idlePressExpired = !grabPose->HasDragged() && now - g.beginNs > 4'000'000'000ll;
+            // Release before generating another pose so finger opening or
+            // disappearing cannot move the window away from its last drag pose.
+            if (pick != owner || side[owner]->id != grabHandId ||
+                (now - pressAt > 50'000'000ll && (pinchEnded || idlePressExpired)))
+                releasePinch(now);
+        }
+        const bool holdingRelease = grabPose && grabPose->HoldingRelease(now);
         if (touchOn && touchDebug && pick < 0 && now >= nextTouchReport) {
             nextTouchReport = now + 1'000'000'000ll;
             std::fprintf(stderr,
@@ -266,43 +339,68 @@ int main() {
                          int(side[1] && side[1]->stereo), int(ready[1]), overlayKeys.size());
             std::fflush(stderr);
         }
+        int64_t newestPending = 0;
         for (int s = 0; s < 2; ++s) {
             const auto &g = hands.pinch(s);
             if (g.begins != begins[s]) {
                 begins[s] = g.begins;
-                if (ready[s] && !pressed) {
-                    pick = s;
+                if (ready[s] && !pressed && g.handId == measured[s]->id) {
                     pending[s] = now;
-                    if (s == owner && sentAt && now - sentAt < 100'000'000ll) {
-                        heldOrigin = sentOrigin;
-                        heldDirection = sentDirection;
+                    pendingHand[s] = g.handId;
+                    if (s == owner && sentHandId == g.handId && sentAt && now - sentAt < kAimLossHoldNs) {
+                        heldAim = {sentLaser.origin, pointer_pose::Rotate(sentLaser.rotation, {0, 0, -1})};
                         heldOwner = s;
+                    } else if (heldOwner == s) {
+                        heldOwner = -1;
                     }
                 }
             }
+            if (!pressed && ready[s] && pending[s] > newestPending &&
+                now - pending[s] < kPendingTimeoutNs) {
+                newestPending = pending[s];
+                pick = s;
+            }
         }
+        // Keep the device and its role alive while SteamVR saves the window's
+        // transform, even if the wearer lowers the hand after letting go.
+        const bool holdingMissingAim = !holdingRelease && !newestPending && owner >= 0 && showing &&
+            !side[owner] && !pressed && poses[0].bPoseIsValid && (dashboard || floatPointer) &&
+            sentAt && now - sentAt < kAimLossHoldNs;
+        if (holdingMissingAim) {
+            pending[owner] = 0;
+            heldOwner = -1;
+            releaseGrabLock();
+        }
+        if (holdingRelease || holdingMissingAim) pick = owner;
         if (pick != owner || pick < 0) {
             if (owner >= 0 && owner != pick) pending[owner] = 0;
             if (pick < 0) pending[0] = pending[1] = 0;
-            aim.Reset();  // never interpolate a ray between different hands
             if (pressed) Send(fd, "btn trigger 0"), pressed = touchPressed = false;
+            releaseGrabLock();
             if (showing) Send(fd, "hide"), showing = false;
             claimAt = claimedAt = 0;
             heldOwner = -1;
+            clickDragging = false;
+            clickReleaseUntil = 0;
+            aim.Reset();
+            grabPose.reset();
             sentAt = 0;
             owner = pick;
         }
-        if (owner >= 0) {
+        if (holdingMissingAim) {
+            SendPoses(fd, sentLaser, sentLaser);
+        } else if (holdingRelease && (owner < 0 || !ready[owner])) {
+            SendPoses(fd, sentLaser, grabPose->Pose());
+        } else if (owner >= 0) {
             const auto &h = *side[owner];
+            const auto &sample = *measured[owner];
             const auto &g = hands.pinch(owner);
-            const V shoulder = Local(poses[0].mDeviceToAbsoluteTracking,
-                                     {owner ? 0.17 : -0.17, -0.20, 0.08});
-            const V knuckle = (Point(h.p[5])+Point(h.p[9])) * 0.5;
-            V dir = knuckle-shoulder;
-            const double distance = Length(dir);
-            if (distance > 0.15) {
-                dir = dir * (1.0/distance);
-                const V origin = knuckle + dir*0.03;
+            const auto &captureHead = hands.captureHead();
+            const V knuckle = (Point(sample.p[5])+Point(sample.p[9])) * 0.5;
+            const V headRight{captureHead.m[0][0], captureHead.m[1][0], captureHead.m[2][0]};
+            const auto handAim = aim.Step(knuckle, Position(captureHead), headRight, sample.right,
+                                         sample.id, sample.stereo, sample.captureNs, now, smoothness);
+            if (handAim) {
                 // Optional fingertip contact with a known SteamVR overlay.
                 // Contact is tested against real 3D overlay geometry, not a guessed
                 // fixed screen plane; SteamVR dispatches the virtual controller click.
@@ -311,14 +409,14 @@ int main() {
                 const double tipRange = Length(fromHeadToTip);
                 // Keep the head ray as a fallback. Its perspective can miss the
                 // panel even when the tracked fingertip is beside the surface.
-                const V towardTip = tipRange > 0.12 ? fromHeadToTip * (1.0 / tipRange) : dir;
+                const V towardTip = tipRange > 0.12 ? fromHeadToTip * (1.0 / tipRange) : handAim->direction;
                 bool touching = false;
                 int found = 0, visible = 0, intersections = 0, surfaceTransforms = 0, touchSpaceCode = -1;
                 double closestGap = 1e9;
                 double closestPlaneGap = 1e9, planeX = 0, planeY = 0, planeWidth = 0, planeHeight = 0;
                 std::string closestOverlay = "none";
                 V contactOrigin = tip - towardTip * 0.075, contactDir = towardTip;
-                if (touchOn && tipRange > 0.12 && !g.down) {
+                if (touchOn && tipRange > 0.12 && !g.down && !grabPose) {
                     const V head = Position(poses[0].mDeviceToAbsoluteTracking);
                     const auto &rawHead = poses[0].mDeviceToAbsoluteTracking;
                     vr::ETrackingUniverseOrigin touchSpace = vr::VRCompositor()->GetTrackingSpace();
@@ -456,30 +554,49 @@ int main() {
                 // contact, so its laser and click land on the tested overlay.
                 const bool touchAim = touchOn && (touching || touchPressed) && tipRange > 0.12;
                 if (touchAim) heldOwner = -1; // contact placement always wins
-                const V aimOrigin = touchAim ? contactOrigin : origin;
-                const V aimDir = touchAim ? contactDir : dir;
-                if (touchAim) aim.Reset(); // contact must follow the fingertip exactly
-                else if (smoothPointer) aim.Step(aimOrigin, aimDir, now, smoothness);
-                const V liveOrigin = smoothPointer && !touchAim ? aim.origin : aimOrigin;
-                const V liveDirection = smoothPointer && !touchAim ? aim.direction : aimDir;
-                if (pending[owner] && now - pending[owner] >= 600'000'000ll) {
+                const AimRay liveAim = touchAim ? AimRay{contactOrigin, contactDir} : *handAim;
+                if (pending[owner] && (now - pending[owner] >= kPendingTimeoutNs ||
+                    pendingHand[owner] != sample.id)) {
                     pending[owner] = 0;
-                    if (!pressed) heldOwner = -1;
+                    if (!pressed) {
+                        heldOwner = -1;
+                        releaseGrabLock();
+                    }
                 }
                 if (pending[owner] && heldOwner != owner && !touchAim) {
-                    heldOrigin = liveOrigin;
-                    heldDirection = liveDirection;
+                    heldAim = liveAim;
                     heldOwner = owner;
                 }
+                if (heldOwner == owner && pressed && !touchPressed && !clickDragging &&
+                    now - pressAt >= kClickHoldNs && AimMoved(heldAim, liveAim))
+                    clickDragging = true;
+                if (!pressed && !pending[owner] && now >= clickReleaseUntil) heldOwner = -1;
                 const bool holdClick = !touchAim && heldOwner == owner &&
-                    (pending[owner] || (pressed && !touchPressed && now - pressAt < kClickHoldNs));
-                const V p = holdClick ? heldOrigin : liveOrigin;
-                const V d = holdClick ? heldDirection : liveDirection;
-                char pose[160];
-                std::snprintf(pose, sizeof pose, "pose %.5f %.5f %.5f %.3f %.3f", p.x, p.y, p.z,
-                              std::atan2(-d.x,-d.z)*180/M_PI, std::asin(std::clamp(d.y,-1.0,1.0))*180/M_PI);
-                Send(fd, pose);
-                sentOrigin = p; sentDirection = d; sentAt = now;
+                    (pending[owner] || (pressed && !touchPressed && !clickDragging) ||
+                     now < clickReleaseUntil);
+                const auto &clickAim = holdClick ? heldAim : liveAim;
+                const PointerPose laser{clickAim.origin, AimRotation(clickAim.direction)};
+                PointerPose device = grabPose ? grabPose->Pose() : laser;
+                const auto wrist = [&](bool fitted) {
+                    if (fitted) return sample.fit ?
+                        WristRotation(Point(sample.wristForward), Point(sample.wristRight)) : std::nullopt;
+                    const V across = Point(sample.p[17]) - Point(sample.p[5]);
+                    return WristRotation(Point(sample.p[9]) - Point(sample.p[0]), sample.right ? across : across * -1);
+                };
+                if (grabPose && !holdingRelease && now - pressAt >= kGrabStartHoldNs) {
+                    // Keep the last wrist contribution if a sample is missing.
+                    const auto trackedWrist = g.down && sample.id == grabHandId ?
+                        wrist(grabUsesFittedWrist) : std::nullopt;
+                    device = grabPose->Step({knuckle, Position(captureHead), trackedWrist,
+                                             sample.captureNs, sample.stereo}, now);
+                    if (debug && now >= nextGrabReport) {
+                        ReportGrabPose(h.right, dashboard, grabPose->WristAngle(), sentRotation, poses);
+                        nextGrabReport = now + 500'000'000ll;
+                    }
+                }
+                SendPoses(fd, laser, device);
+                sentRotation = device.rotation;
+                sentLaser = laser; sentAt = now; sentHandId = touchAim ? 0 : sample.id;
                 if (!showing) {
                     Send(fd, owner ? "role right" : "role left");
                     showing = Send(fd, "show");
@@ -487,12 +604,12 @@ int main() {
                     // before asking the compositor to use this laser.
                     if (showing) claimAt = now + 180'000'000ll;
                 }
-                if (showing && claimAt && now >= claimAt) {
+                if (!holdingRelease && showing && claimAt && now >= claimAt) {
                     Send(fd, "btn a 1"); Send(fd, "btn a 0");
                     claimAt = 0;
                     claimedAt = now;
                 }
-                if (showing && !pressed && touchOn && touching && now >= touchReleaseAt) {
+                if (!holdingRelease && showing && !pressed && !grabLockAt && touchOn && touching && now >= touchReleaseAt) {
                     Send(fd, "btn trigger 1"); pressed = touchPressed = true; pressAt = now;
                 }
                 if (touchPressed) {
@@ -500,16 +617,41 @@ int main() {
                         Send(fd, "btn trigger 0");
                         pressed = touchPressed = false;
                         touchReleaseAt = now + 130'000'000ll;
-                        aim.Reset();
                     }
                 }
-                if (showing && !pressed && !claimAt && claimedAt &&
+                if (!holdingRelease && showing && !pressed && !claimAt && claimedAt &&
                     now - claimedAt >= 60'000'000ll && pending[owner] &&
-                    now-pending[owner] < 600'000'000ll) {
-                    Send(fd, "btn trigger 1"); pressed = true; pressAt = now; pending[owner] = 0;
+                    now - pending[owner] < kPendingTimeoutNs) {
+                    // Floated windows can be grabbed even when SteamVR says
+                    // the dashboard is visible. That flag only gates mouse lock.
+                    const bool grabbing = g.down && g.handId == h.id;
+                    const bool lockGrab = grabbing && !dashboard;
+                    if (!lockGrab) releaseGrabLock();
+                    if (lockGrab && !grabLockAt) {
+                        if (Send(fd, "btn grab_lock 1")) grabLockAt = now;
+                    } else if (!lockGrab || now - grabLockAt >= kGrabLockLeadNs) {
+                        if (Send(fd, "btn trigger 1")) {
+                            pressed = true;
+                            pressAt = now;
+                            pending[owner] = 0;
+                            clickReleaseUntil = 0;
+                            // Measure wrist motion relative to trigger down.
+                            if (grabbing) {
+                                // The palm fit and the landmark estimate can
+                                // use different axes. Keep one source per grab.
+                                const auto fitted = wrist(true);
+                                grabUsesFittedWrist = fitted.has_value();
+                                grabPose.emplace(device, GrabSample{knuckle, Position(captureHead),
+                                                 fitted ? fitted : wrist(false), sample.captureNs, sample.stereo}, now);
+                                grabHandId = sample.id;
+                                nextGrabReport = 0;
+                            }
+                        }
+                    }
                 }
-                if (pressed && !touchPressed && (!g.down || now-g.beginNs > 4'000'000'000ll) && now-pressAt > 50'000'000ll)
-                    Send(fd, "btn trigger 0"), pressed = false, heldOwner = -1;
+                if (pressed && !touchPressed && !grabPose &&
+                    (!g.down || now-g.beginNs > 4'000'000'000ll) && now-pressAt > 50'000'000ll)
+                    releasePinch(now);
             }
         }
         vr::VREvent_t event;
@@ -532,7 +674,9 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(12));
     }
 done:
-    Send(fd, "btn trigger 0"); Send(fd, "hide");
+    Send(fd, "btn trigger 0");
+    releaseGrabLock();
+    Send(fd, "hide");
     close(fd);
     vr::VR_Shutdown();
     return 0;

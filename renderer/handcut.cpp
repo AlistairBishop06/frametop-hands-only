@@ -52,6 +52,24 @@ bool Finite(const float *v, int n) {
     return true;
 }
 
+void SetWristAxes(Hand &hand, const Mat &head, const float q[4]) {
+    if (!Finite(q, 4)) return;
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    const float norm2 = x*x + y*y + z*z + w*w;
+    if (norm2 < 0.9f || norm2 > 1.1f) return;
+    // Transform the fitted wrist's local +X and -Z into the same room
+    // coordinates as the landmarks, using the HMD pose at camera capture.
+    const float s = 2.0f / norm2;
+    const float right[3] = {1-s*(y*y+z*z), s*(x*y+w*z), s*(x*z-w*y)};
+    const float forward[3] = {-s*(x*z+w*y), -s*(y*z-w*x), s*(x*x+y*y)-1};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            hand.wristRight[i] += head.m[i][j] * right[j];
+            hand.wristForward[i] += head.m[i][j] * forward[j];
+        }
+    }
+}
+
 // The skeleton's rough radii (hands/track/skeleton.cpp) at the average hand's size, for version 1.
 float DefaultRadius(int i) { return i == 0 ? 0.020f : i == 1 || i % 4 == 1 ? 0.012f : i <= 4 ? 0.0095f : 0.0085f; }
 
@@ -165,6 +183,7 @@ void Hands::Ingest(const fh_hands_t &v1, const fh_hand_fit_t *fits, const fh_ges
             o.tracked = in.flags & FH_PINCH_TRACKED, o.down = in.flags & FH_PINCH_DOWN, o.lost = in.flags & FH_PINCH_LOST;
             o.handId = in.hand_id, o.begins = in.begins, o.ends = in.ends;
             o.beginNs = int64_t(in.begin_ns), o.endNs = int64_t(in.end_ns);
+            o.captureNs = int64_t(g->capture_ns);
             o.distance = in.distance, o.strength = in.strength;
             if (Finite(in.point, 3)) Apply(head, in.point, o.point);
             if (Finite(in.begin_point, 3)) Apply(HeadAt(o.beginNs), in.begin_point, o.beginPoint);
@@ -191,6 +210,7 @@ void Hands::Ingest(const fh_hands_t &v1, const fh_hand_fit_t *fits, const fh_ges
         bool ok = true;
         if (f) {
             h.fit = true;
+            SetWristAxes(h, head, f->joints[0].q);
             for (int j = 0; j < 21; ++j) {
                 ok = ok && Finite(f->joints[j].p, 3);
                 Apply(head, f->joints[j].p, h.p[j]);

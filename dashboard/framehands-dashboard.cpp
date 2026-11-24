@@ -15,39 +15,53 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
 #include <sys/wait.h>
 #include <unistd.h>
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "assets/stb_truetype.h"
 
 namespace {
-constexpr int W = 640, H = 790;
+constexpr int W = 1280, H = 1580;
 struct RGB { uint8_t r, g, b; };
 struct Box {
     int x0, y0, x1, y1;
     bool Contains(float x, float y) const { return x >= x0 && x < x1 && y >= y0 && y < y1; }
 };
-constexpr Box kClose{580, 24, 626, 70};
-constexpr Box kTracking{28, 105, 612, 218};
-constexpr Box kVisuals{28, 232, 311, 345};
-constexpr Box kTouch{327, 232, 612, 345};
-constexpr Box kGamePause{28, 360, 612, 449};
-constexpr Box kSlider{49, 517, 591, 572};
-constexpr Box kColour{28, 592, 612, 691};
-constexpr Box kStable{332, 705, 464, 744};
-constexpr Box kDev{472, 705, 612, 744};
-constexpr Box kUpdate{28, 747, 612, 784};
-constexpr int kSliderLeft = 50, kSliderRight = 590;
+constexpr Box kClose{1144, 56, 1224, 136};
+constexpr Box kTracking{56, 184, 1224, 376};
+constexpr Box kVisuals{56, 460, 1224, 566};
+constexpr Box kTouch{56, 566, 1224, 672};
+constexpr Box kGamePause{56, 672, 1224, 778};
+constexpr Box kSlider{88, 936, 1192, 990};
+constexpr Box kColour{80, 1102, 1200, 1182};
+constexpr Box kStable{780, 1306, 982, 1370};
+constexpr Box kDev{986, 1306, 1188, 1370};
+constexpr Box kUpdate{844, 1425, 1192, 1501};
+constexpr int kSliderLeft = 88, kSliderRight = 1192;
 std::vector<uint8_t> pixels(W * H * 4);
 std::string updateStatus = "CHECK FOR UPDATES";
 std::string handColour = "white";
 std::string updateChannel = "stable";
 constexpr const char *kColourNames[] = {"red", "orange", "yellow", "green", "blue", "purple", "black", "white"};
-constexpr RGB kColourSwatches[] = {{230, 55, 55}, {246, 132, 37}, {247, 213, 42}, {56, 202, 91},
-                                   {62, 126, 238}, {167, 89, 220}, {16, 20, 27}, {244, 248, 253}};
+constexpr RGB kColourSwatches[] = {{226, 98, 93}, {240, 159, 80}, {235, 207, 95}, {109, 185, 131},
+                                   {101, 159, 223}, {171, 128, 203}, {11, 17, 19}, {241, 245, 245}};
 
-// Five-wide bitmap capitals keep this app entirely self-contained on ARM64.
+std::vector<uint8_t> fontBytes;
+stbtt_fontinfo fontInfo{};
+bool fontReady = false;
+void LoadFont() {
+    const auto path = std::filesystem::read_symlink("/proc/self/exe")
+        .parent_path().parent_path() / "assets/InterVariable.ttf";
+    std::ifstream file(path, std::ios::binary);
+    fontBytes.assign(std::istreambuf_iterator<char>(file), {});
+    fontReady = !fontBytes.empty() && stbtt_InitFont(&fontInfo, fontBytes.data(), 0);
+    if (!fontReady) std::cerr << "framehands-dashboard: Inter font unavailable: " << path << '\n';
+}
+// Retained only as a fallback if the packaged font is unavailable.
 const uint8_t *Glyph(char c) {
     static const uint8_t font[39][7] = {
         {14,17,17,31,17,17,17}, // A
@@ -122,6 +136,32 @@ void Circle(int cx, int cy, int radius, RGB c) {
             }
 }
 void TextAt(int x0, int y, const std::string &s, int size, RGB c) {
+    if (fontReady) {
+        const float scale = stbtt_ScaleForPixelHeight(&fontInfo, float(size));
+        int ascent = 0, descent = 0, gap = 0;
+        stbtt_GetFontVMetrics(&fontInfo, &ascent, &descent, &gap);
+        const int baseline = y + int(std::lround(ascent * scale));
+        float pen = float(x0);
+        for (size_t k = 0; k < s.size(); ++k) {
+            const unsigned char ch = static_cast<unsigned char>(s[k]);
+            int bw = 0, bh = 0, ox = 0, oy = 0;
+            unsigned char *bitmap = stbtt_GetCodepointBitmap(&fontInfo, 0, scale, ch, &bw, &bh, &ox, &oy);
+            for (int row = 0; row < bh; ++row) for (int col = 0; col < bw; ++col) {
+                const int px = int(std::lround(pen)) + ox + col, py = baseline + oy + row;
+                if (px < 0 || px >= W || py < 0 || py >= H) continue;
+                const int alpha = bitmap[row * bw + col];
+                const size_t at = size_t((py * W + px) * 4);
+                pixels[at] = uint8_t((pixels[at] * (255 - alpha) + c.r * alpha) / 255);
+                pixels[at + 1] = uint8_t((pixels[at + 1] * (255 - alpha) + c.g * alpha) / 255);
+                pixels[at + 2] = uint8_t((pixels[at + 2] * (255 - alpha) + c.b * alpha) / 255);
+            }
+            stbtt_FreeBitmap(bitmap, nullptr);
+            int advance = 0, bearing = 0;
+            stbtt_GetCodepointHMetrics(&fontInfo, ch, &advance, &bearing);
+            pen += advance * scale;
+        }
+        return;
+    }
     for (size_t k = 0; k < s.size(); ++k) {
         const uint8_t *p = Glyph(s[k]);
         for (int r = 0; r < 7; ++r)
@@ -132,8 +172,8 @@ void TextAt(int x0, int y, const std::string &s, int size, RGB c) {
     }
 }
 void Toggle(int x, int y, bool on) {
-    RoundRect({x, y, x+72, y+38}, 19, on ? RGB{34, 156, 133} : RGB{64, 81, 101});
-    Circle(x + (on ? 52 : 20), y+19, 14, {246, 251, 253});
+    RoundRect({x, y, x+136, y+64}, 32, on ? RGB{113,215,197} : RGB{71,86,93});
+    Circle(x + (on ? 104 : 32), y+32, 26, {11,32,30});
 }
 
 std::filesystem::path AppRoot() {
@@ -233,72 +273,86 @@ std::string UpdateChannel() {
     return channel;
 }
 void Paint(bool enabled, bool visuals, bool touch, bool gamePause, int smoothness, bool busy, bool failed) {
-    const RGB ink{235, 244, 250}, muted{139, 161, 178}, teal{75, 215, 179};
-    Rect(0, 0, W, H, {12, 20, 31});
-    Rect(0, 0, W, 4, teal);
-    RoundRect({28, 27, 74, 73}, 12, {28, 83, 86});
-    RoundRect({43, 47, 61, 64}, 5, ink);
-    Rect(43, 39, 47, 54, ink); Rect(49, 35, 53, 53, ink);
-    Rect(55, 38, 59, 53, ink); Rect(61, 43, 65, 54, ink);
-    TextAt(91, 31, "FRAMEHANDS", 4, ink);
-    TextAt(93, 67, "HAND TRACKING CONTROLS", 2, muted);
-    RoundRect(kClose, 12, {34, 48, 63});
-    for (int i = 0; i < 14; ++i) {
-        Rect(595+i, 39+i, 598+i, 42+i, ink);
-        Rect(608-i, 39+i, 611-i, 42+i, ink);
-    }
+    const RGB ink{241,245,245}, muted{171,185,189}, teal{113,215,197};
+    Rect(0, 0, W, H, {17,21,23});
+    TextAt(56, 49, "FrameHands", 46, ink);
+    TextAt(56, 113, "Hand tracking for Steam Frame", 24, muted);
+    RoundRect(kClose, 20, {39,49,55});
+    TextAt(1172, 65, "x", 48, ink);
+
     const bool paused = gamePause && GamePaused();
-    RoundRect(kTracking, 18, {25, 43, 55});
-    RoundRect({28, 105, 33, 218}, 2, enabled ? teal : muted);
-    TextAt(51, 124, "TRACKING", 3, ink);
-    TextAt(51, 164, paused ? "PAUSED FOR VR GAME" : failed ? "CHECK LOGS" :
-           busy ? "APPLYING CHANGE" : enabled ? "HANDS ACTIVE" : "HANDS OFF", 2,
-           paused ? RGB{244, 190, 105} : enabled ? teal : muted);
-    Toggle(514, 139, enabled);
+    RoundRect(kTracking, 24, {59,112,104});
+    RoundRect({58,186,1222,374}, 22, {25,45,45});
+    TextAt(92, 214, "Hand Tracking", 36, ink);
+    Circle(100, 300, 6, paused ? RGB{244,190,105} : teal);
+    TextAt(122, 278, paused ? "Paused for VR game" : failed ? "Check logs" :
+           busy ? "Applying change" : enabled ? "Tracking active" : "Tracking off",
+           26, paused ? RGB{244,190,105} : teal);
+    Toggle(1044, 240, enabled);
 
-    TextAt(29, 228, "INTERACTION", 2, muted);
-    RoundRect(kVisuals, 14, {24, 39, 53});
-    TextAt(48, 249, "HAND OVERLAY", 2, ink);
-    TextAt(48, 281, visuals ? "VISIBLE" : "HIDDEN", 2, visuals ? teal : muted);
-    Toggle(227, 291, visuals);
-    RoundRect(kTouch, 14, {24, 39, 53});
-    TextAt(347, 249, "DIRECT TOUCH", 2, ink);
-    TextAt(347, 281, touch ? "ON" : "OFF", 2, touch ? teal : muted);
-    Toggle(531, 291, touch);
-    RoundRect(kGamePause, 14, {24, 39, 53});
-    TextAt(50, 380, "PAUSE DURING VR GAMES", 2, ink);
-    TextAt(50, 414, gamePause ? (paused ? "TRACKING PAUSED" : "AUTOMATIC") : "OFF", 2,
-           paused ? RGB{244, 190, 105} : muted);
-    Toggle(514, 385, gamePause);
+    TextAt(56, 408, "Interaction", 26, muted);
+    RoundRect({56,460,1224,778}, 24, {52,65,71});
+    RoundRect({58,462,1222,776}, 22, {26,34,39});
+    Rect(88, 566, 1192, 567, {52,65,71});
+    Rect(88, 672, 1192, 673, {52,65,71});
+    TextAt(88, 480, "Hand Visuals", 28, ink);
+    TextAt(88, 524, "Show the hand overlay.", 22, muted);
+    Toggle(1048, 473, visuals);
+    TextAt(88, 586, "Direct Touch", 28, ink);
+    TextAt(88, 630, "Interact with your fingertips.", 22, muted);
+    Toggle(1048, 579, touch);
+    TextAt(88, 692, "Pause During VR Games", 28, ink);
+    TextAt(88, 736, "Pause tracking while a VR game is running.", 22, muted);
+    Toggle(1048, 685, gamePause);
 
-    TextAt(29, 462, "APPEARANCE", 2, muted);
-    RoundRect({28, 489, 612, 579}, 14, {24, 39, 53});
-    TextAt(50, 495, "SMOOTHNESS", 2, ink);
-    TextAt(552, 495, std::to_string(std::clamp(smoothness, 0, 100)), 2, teal);
-    RoundRect({kSliderLeft, 528, kSliderRight, 544}, 8, {52, 68, 83});
+    TextAt(56, 810, "Appearance", 26, muted);
+    RoundRect({56,862,1224,1194}, 24, {52,65,71});
+    RoundRect({58,864,1222,1192}, 22, {26,34,39});
+    TextAt(88, 883, "Smoothness", 28, ink);
+    TextAt(1115, 880, std::to_string(smoothness), 32, teal);
+    RoundRect({88,962,1192,970}, 4, {71,86,93});
     const int knob = kSliderLeft + (kSliderRight-kSliderLeft) * std::clamp(smoothness, 0, 100) / 100;
-    if (knob > kSliderLeft) RoundRect({kSliderLeft, 528, knob, 544}, 8, teal);
-    Circle(knob, 536, 12, ink);
-    RoundRect(kColour, 14, {24, 39, 53});
+    if (knob > kSliderLeft) RoundRect({88,962,knob,970}, 4, teal);
+    Circle(knob, 966, 24, teal);
+    Circle(knob, 966, 20, {241,245,245});
+    TextAt(88, 990, "0", 22, muted);
+    TextAt(1150, 990, "100", 22, muted);
+    Rect(88, 1036, 1192, 1037, {52,65,71});
+    TextAt(88, 1055, "Hand Colour", 28, ink);
     std::string colour = handColour;
-    std::transform(colour.begin(), colour.end(), colour.begin(), [](unsigned char c) { return std::toupper(c); });
-    TextAt(50, 599, "HAND COLOUR", 2, ink);
-    TextAt(450, 599, colour, 2, muted);
+    if (!colour.empty()) colour[0] = char(std::toupper(static_cast<unsigned char>(colour[0])));
+    TextAt(1090, 1058, colour, 24, muted);
     for (int i = 0; i < 8; ++i) {
-        const int x = 71 + 68 * i;
-        if (handColour == kColourNames[i]) Circle(x, 645, 23, teal);
-        Circle(x, 645, 18, kColourSwatches[i]);
+        const int cx = 142 + 140 * i;
+        if (handColour == kColourNames[i]) Circle(cx, 1142, 39, teal);
+        Circle(cx, 1142, 30, kColourSwatches[i]);
+        if (i == 6) { Circle(cx, 1142, 29, {11,17,19}); }
     }
-    TextAt(29, 704, "UPDATES", 2, muted);
-    RoundRect(kStable, 10, updateChannel == "stable" ? RGB{35, 105, 98} : RGB{34, 48, 63});
-    RoundRect(kDev, 10, updateChannel == "dev" ? RGB{35, 105, 98} : RGB{34, 48, 63});
-    TextAt(359, 716, "STABLE", 2, ink);
-    TextAt(515, 716, "DEV", 2, ink);
-    RoundRect(kUpdate, 10, {32, 91, 85});
-    const std::string shown = updateStatus.rfind("AVAILABLE ", 0) == 0
-        ? "DOWNLOAD " + updateStatus.substr(10) : updateStatus;
-    const std::string label = shown.size() > 31 ? shown.substr(0, 31) : shown;
-    TextAt(50, 759, label, 2, updateStatus.rfind("ERROR", 0) == 0 ? RGB{255, 149, 132} : ink);
+
+    TextAt(56, 1226, "Updates", 26, muted);
+    RoundRect({56,1278,1224,1532}, 24, {52,65,71});
+    RoundRect({58,1280,1222,1530}, 22, {26,34,39});
+    TextAt(88, 1312, "Release channel", 28, ink);
+    RoundRect({776,1302,1192,1374}, 18, {16,23,27});
+    RoundRect(updateChannel == "dev" ? kDev : kStable, 14, {49,78,74});
+    TextAt(837, 1318, "Stable", 28, updateChannel == "stable" ? ink : muted);
+    TextAt(1052, 1318, "Dev", 28, updateChannel == "dev" ? ink : muted);
+    Rect(88, 1396, 1192, 1397, {52,65,71});
+    const bool available = updateStatus.rfind("AVAILABLE ", 0) == 0;
+    const std::string title = failed ? "Update failed" : available ? "Update available" :
+        updateStatus == "CHECKING" ? "Checking for updates" :
+        updateStatus.rfind("ERROR", 0) == 0 ? "Update check failed" :
+        updateStatus == "RESTART HEADSET" ? "Restart headset" : "No update available";
+    TextAt(88, 1423, title, 28, ink);
+    std::string detail = available ? updateStatus.substr(10) :
+        updateStatus == "CHECK FOR UPDATES" ? "Check for the latest release." :
+        updateStatus == "UP TO DATE" ? "You're on the latest " + updateChannel + " version." :
+        updateStatus;
+    if (detail.size() > 45) detail.resize(45);
+    TextAt(88, 1468, detail, 22, muted);
+    RoundRect(kUpdate, 16, {82,120,111});
+    RoundRect({846,1427,1190,1499}, 14, {44,73,69});
+    TextAt(available ? 954 : 895, 1447, available ? "Download" : "Check for Updates", 26, ink);
 }
 int SmoothnessAt(float x) {
     return std::clamp(int(std::lround((x - kSliderLeft) * 100.0f / (kSliderRight-kSliderLeft))), 0, 100);
@@ -362,6 +416,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && !std::strcmp(argv[1], "--monitor-games")) return GameMonitor();
     if (argc == 2 && !std::strcmp(argv[1], "--unregister")) return RegisterManifest(true);
     if (argc == 2 && !std::strcmp(argv[1], "--register")) return RegisterManifest(false);
+    LoadFont();
     vr::EVRInitError error = vr::VRInitError_None;
     vr::VR_Init(&error, vr::VRApplication_Overlay);
     if (error != vr::VRInitError_None) {
@@ -529,8 +584,8 @@ int main(int argc, char **argv) {
                     break;
                 }
                 if (kColour.Contains(x, y)) {
-                    const int slot = std::clamp((int(x) - 37) / 68, 0, 7);
-                    if (y >= 622 && y < 690) {
+                    const int slot = std::clamp((int(x) - 72) / 140, 0, 7);
+                    if (y >= 1102 && y < 1182) {
                         child = fork();
                         if (child == 0) {
                             const std::string cli = Cli().string();

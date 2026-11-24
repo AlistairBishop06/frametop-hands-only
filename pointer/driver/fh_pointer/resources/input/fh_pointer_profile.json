@@ -11,6 +11,10 @@
 			"type": "button",
 			"click": true
 		},
+		"/input/grab_lock": {
+			"type": "button",
+			"click": true
+		},
 		"/input/b": {
 			"type": "button",
 			"click": true

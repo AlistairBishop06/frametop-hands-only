@@ -24,4 +24,5 @@ print("Retest dashboard release checks, checksum verification, install failure r
 print("Retest that game-pause releases virtual pointer inputs, opts out of the hand role, and reports a disconnected pose without restarting SteamVR.")
 print("Retest PAUSE_IN_GAMES in SteamVR Home/Aurora, a local game, and a streamed VR game; inspect the scene app key and resume on exit.")
 print("Retest Direct Touch overlay discovery, GetTransformForOverlayCoordinates, and fingertip contact on the dashboard and floated panels after a SteamVR update.")
+print("Retest small-button clicks, small head movements while holding the hand still, and deliberate pointer sweeps. Then move and tilt a floated panel and check that it keeps its position and tilt after release.")
 sys.exit(0 if all(checks.values()) else 1)

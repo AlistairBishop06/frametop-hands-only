@@ -12,6 +12,33 @@
 		"/actions/lasermouse": {
 			"sources": [
 				{
+					"path": "/user/hand/left/input/grab_lock",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/LockMousePosition"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/right/input/grab_lock",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/LockMousePosition"
+						}
+					}
+				},
+				{
+					"path": "/user/treadmill/input/grab_lock",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/lasermouse/in/LockMousePosition"
+						}
+					}
+				},
+				{
 					"path": "/user/hand/left/input/trigger",
 					"mode": "button",
 					"inputs": {
@@ -123,15 +150,15 @@
 			"poses": [
 				{
 					"output": "/actions/lasermouse/in/Pointer",
-					"path": "/user/hand/left/pose/raw"
+					"path": "/user/hand/left/pose/tip"
 				},
 				{
 					"output": "/actions/lasermouse/in/Pointer",
-					"path": "/user/hand/right/pose/raw"
+					"path": "/user/hand/right/pose/tip"
 				},
 				{
 					"output": "/actions/lasermouse/in/Pointer",
-					"path": "/user/treadmill/pose/raw"
+					"path": "/user/treadmill/pose/tip"
 				}
 			]
 		},

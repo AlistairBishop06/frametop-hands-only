@@ -2,6 +2,7 @@
 // The helper supplies raw-space pose and trigger via @framehands_pointer.
 // Hidden devices hint OptOut, and the command watchdog releases input if the helper stops.
 #include "../../config/ftsock.h"
+#include "../helper/pointer_rotation.h"
 
 #include <openvr_driver.h>
 
@@ -12,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -24,6 +26,11 @@ using namespace vr;
 
 namespace {
 
+using pointer_pose::PointerPose;
+
+constexpr const char *kButtonNames[] = {"trigger", "b", "x", "system", "joystick", "a", "grab_lock"};
+constexpr int kButtons = sizeof kButtonNames / sizeof kButtonNames[0];
+
 struct State {
     std::mutex lock;
     std::chrono::steady_clock::time_point lastCommand = std::chrono::steady_clock::now();
@@ -32,18 +39,16 @@ struct State {
     float pos[3] = {};
     bool hasQuat = false;  // set by "posq": use quat instead of yaw/pitch
     float quat[4] = {1, 0, 0, 0};
+    std::optional<PointerPose> laser;
 
     float yaw = 0.f, pitch = 0.f;  // degrees
-    bool buttons[6] = {};
+    bool buttons[kButtons] = {};
     // A press the frame didn't send yet. A short tap's release can come before the next frame, and
     // SteamVR never sees a press that went up between two frames: the frame sends it, the next one the release.
-    bool pressed[6] = {};
+    bool pressed[kButtons] = {};
     int32_t role = 0;  // "role": the hint while connected; 0 = the configured one
     float scrollX = 0.f, scrollY = 0.f;
 };
-
-const int kButtons = 6;
-const char *kButtonNames[kButtons] = {"trigger", "b", "x", "system", "joystick", "a"};
 
 HmdQuaternion_t QuatFromYawPitch(float yawDeg, float pitchDeg) {
     // Yaw about +Y, then pitch about +X. SteamVR forward is -Z.
@@ -69,6 +74,18 @@ HmdQuaternion_t QuatFromMatrix(const float (&m)[3][4]) {
     }
     const float s = 2.f * std::sqrt(1.f + m[2][2] - m[0][0] - m[1][1]);
     return {(m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25f * s};
+}
+
+HmdMatrix34_t LaserOffset(const DriverPose_t &pose, const PointerPose &laser) {
+    const PointerPose device{{pose.vecPosition[0], pose.vecPosition[1], pose.vecPosition[2]},
+                             {pose.qRotation.w, pose.qRotation.x, pose.qRotation.y, pose.qRotation.z}};
+    const auto offset = pointer_pose::RelativePose(device, laser);
+    const auto x = pointer_pose::Rotate(offset.rotation, {1, 0, 0});
+    const auto y = pointer_pose::Rotate(offset.rotation, {0, 1, 0});
+    const auto z = pointer_pose::Rotate(offset.rotation, {0, 0, 1});
+    return {{{float(x.x), float(y.x), float(z.x), float(offset.origin.x)},
+             {float(x.y), float(y.y), float(z.y), float(offset.origin.y)},
+             {float(x.z), float(y.z), float(z.z), float(offset.origin.z)}}};
 }
 
 class PointerDevice : public ITrackedDeviceServerDriver {
@@ -100,12 +117,17 @@ public:
         props->SetBoolProperty(c, Prop_NeverTracked_Bool, false);
 
         auto input = VRDriverInput();
+        if (input->CreatePoseComponent(c, "/pose/tip", &laser_) != VRInputError_None) {
+            laser_ = 0;
+            VRDriverLog()->Log("fh_pointer: independent laser pose unavailable; using live aim for both poses");
+        }
         input->CreateBooleanComponent(c, "/input/trigger/click", &buttons_[0]);
         input->CreateBooleanComponent(c, "/input/b/click", &buttons_[1]);
         input->CreateBooleanComponent(c, "/input/x/click", &buttons_[2]);
         input->CreateBooleanComponent(c, "/input/system/click", &buttons_[3]);
         input->CreateBooleanComponent(c, "/input/joystick/click", &buttons_[4]);
         input->CreateBooleanComponent(c, "/input/a/click", &buttons_[5]);
+        input->CreateBooleanComponent(c, "/input/grab_lock/click", &buttons_[6]);
         input->CreateScalarComponent(c, "/input/joystick/x", &scrollX_, VRScalarType_Absolute, VRScalarUnits_NormalizedTwoSided);
         input->CreateScalarComponent(c, "/input/joystick/y", &scrollY_, VRScalarType_Absolute, VRScalarUnits_NormalizedTwoSided);
 
@@ -140,11 +162,12 @@ public:
             snapshot.explicitPose = state_->explicitPose;
             std::memcpy(snapshot.pos, state_->pos, sizeof snapshot.pos);
             snapshot.hasQuat = state_->hasQuat;
+            snapshot.laser = state_->laser;
             std::memcpy(snapshot.quat, state_->quat, sizeof snapshot.quat);
             snapshot.visible = state_->visible;
             snapshot.yaw = state_->yaw;
             snapshot.pitch = state_->pitch;
-            for (int i = 0; i < 6; ++i) {
+            for (int i = 0; i < kButtons; ++i) {
                 snapshot.buttons[i] = state_->buttons[i] || state_->pressed[i];
                 state_->pressed[i] = false;
             }
@@ -167,6 +190,21 @@ public:
             pose.vecPosition[1] = m[1][3] - 0.05f;  // just below the eyes
             pose.vecPosition[2] = m[2][3];
             pose.qRotation = QuatFromMatrix(m);
+        }
+        if (snapshot.visible && laser_) {
+            HmdMatrix34_t offset{{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
+            if (snapshot.laser) offset = LaserOffset(pose, *snapshot.laser);
+            if (VRDriverInput()->UpdatePoseComponent(laser_, &offset, 0) != VRInputError_None) {
+                laser_ = 0;
+                VRDriverLog()->Log("fh_pointer: laser pose update failed; using live aim for both poses");
+            }
+        }
+        if (!laser_ && snapshot.laser) {
+            const auto &laser = *snapshot.laser;
+            pose.vecPosition[0] = laser.origin.x;
+            pose.vecPosition[1] = laser.origin.y;
+            pose.vecPosition[2] = laser.origin.z;
+            pose.qRotation = {laser.rotation.w, laser.rotation.x, laser.rotation.y, laser.rotation.z};
         }
         if (snapshot.role > 0 && snapshot.role != role_) {
             role_ = snapshot.role;
@@ -218,6 +256,7 @@ private:
     bool inputsSent_ = false, sentButtons_[kButtons] = {};
     float sentScrollX_ = 0.f, sentScrollY_ = 0.f;
     VRInputComponentHandle_t buttons_[kButtons] = {};
+    VRInputComponentHandle_t laser_ = 0;
     VRInputComponentHandle_t scrollX_ = 0, scrollY_ = 0;
 };
 
@@ -272,9 +311,12 @@ private:
         enum { kNone, kPosq, kPose, kHide, kShow, kRole, kBtn, kScroll };
         int kind = kNone;
         char name[32];
-        float f[7];
+        float f[14];
         int v = 0, role = 0, button = -1;
-        if (std::sscanf(cmd, "posq %f %f %f %f %f %f %f", &f[0], &f[1], &f[2], &f[3], &f[4], &f[5], &f[6]) == 7) {
+        const int poseFields = std::sscanf(cmd, "posq %f %f %f %f %f %f %f %f %f %f %f %f %f %f",
+            &f[0], &f[1], &f[2], &f[3], &f[4], &f[5], &f[6],
+            &f[7], &f[8], &f[9], &f[10], &f[11], &f[12], &f[13]);
+        if (poseFields == 7 || poseFields == 14) {
             kind = kPosq;
         } else if (std::sscanf(cmd, "pose %f %f %f %f %f", &f[0], &f[1], &f[2], &f[3], &f[4]) == 5) {
             kind = kPose;
@@ -301,15 +343,21 @@ private:
         std::lock_guard<std::mutex> guard(state_.lock);
         state_.lastCommand = std::chrono::steady_clock::now();
         switch (kind) {
-        case kPosq:
+        case kPosq: {
+            // The first pose is always the laser. Older helpers send it alone.
+            const float *device = poseFields == 14 ? f + 7 : f;
             state_.explicitPose = true;
             state_.hasQuat = true;
-            std::memcpy(state_.pos, f, sizeof state_.pos);
-            std::memcpy(state_.quat, f + 3, sizeof state_.quat);
+            std::memcpy(state_.pos, device, sizeof state_.pos);
+            std::memcpy(state_.quat, device + 3, sizeof state_.quat);
+            if (poseFields == 14) state_.laser = PointerPose{{f[0], f[1], f[2]}, {f[3], f[4], f[5], f[6]}};
+            else state_.laser.reset();
             break;
+        }
         case kPose:
             state_.explicitPose = true;
             state_.hasQuat = false;
+            state_.laser.reset();
             std::memcpy(state_.pos, f, sizeof state_.pos);
             state_.yaw = f[3];
             state_.pitch = f[4];
