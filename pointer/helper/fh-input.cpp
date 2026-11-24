@@ -232,6 +232,7 @@ int main() {
     std::optional<GrabPose> grabPose;
     Quaternion sentRotation{1, 0, 0, 0};
     uint32_t grabHandId = 0;
+    bool grabUsesFittedWrist = false;
     int64_t nextGrabReport = 0;
     int64_t grabLockAt = 0;
     auto releaseGrabLock = [&] {
@@ -571,16 +572,16 @@ int main() {
                 const auto &clickAim = holdClick ? heldAim : liveAim;
                 const PointerPose laser{clickAim.origin, AimRotation(clickAim.direction)};
                 PointerPose device = grabPose ? grabPose->Pose() : laser;
-                const auto wrist = [&] {
-                    if (const auto fitted = WristRotation(Point(sample.wristForward), Point(sample.wristRight)))
-                        return fitted;
+                const auto wrist = [&](bool fitted) {
+                    if (fitted) return WristRotation(Point(sample.wristForward), Point(sample.wristRight));
                     const V across = Point(sample.p[17]) - Point(sample.p[5]);
                     return WristRotation(Point(sample.p[9]) - Point(sample.p[0]), sample.right ? across : across * -1);
                 };
                 if (grabPose && !holdingRelease && now - pressAt >= kGrabStartHoldNs) {
                     // Keep the last wrist contribution if a sample is missing.
-                    const auto trackedWrist = g.down && sample.id == grabHandId ? wrist() : std::nullopt;
-                    device = grabPose->Step(knuckle, trackedWrist);
+                    const auto trackedWrist = g.down && sample.id == grabHandId ?
+                        wrist(grabUsesFittedWrist) : std::nullopt;
+                    device = grabPose->Step(knuckle, trackedWrist, sample.captureNs, now);
                     if (debug && now >= nextGrabReport) {
                         ReportGrabPose(h.right, dashboard, grabPose->WristAngle(), sentRotation, poses);
                         nextGrabReport = now + 500'000'000ll;
@@ -629,7 +630,12 @@ int main() {
                             clickReleaseUntil = 0;
                             // Measure wrist motion relative to trigger down.
                             if (grabbing) {
-                                grabPose.emplace(device, knuckle, wrist());
+                                // The palm fit and the landmark estimate can
+                                // use different axes. Keep one source per grab.
+                                const auto fitted = wrist(true);
+                                grabUsesFittedWrist = fitted.has_value();
+                                grabPose.emplace(device, knuckle, fitted ? fitted : wrist(false),
+                                                 sample.captureNs, now);
                                 grabHandId = sample.id;
                                 nextGrabReport = 0;
                             }

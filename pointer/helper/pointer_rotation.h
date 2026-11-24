@@ -22,6 +22,10 @@ struct Quaternion {
     Quaternion Conjugate() const { return {w, -x, -y, -z}; }
 };
 
+inline double QuaternionDot(Quaternion a, Quaternion b) {
+    return a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
 inline Quaternion operator*(Quaternion a, Quaternion b) {
     return {a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
             a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
@@ -54,8 +58,16 @@ inline std::optional<Quaternion> WristRotation(V forward, V across) {
 }
 
 inline double RotationDistance(Quaternion a, Quaternion b) {
-    const double dot = a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z;
-    return 2 * std::acos(std::clamp(std::abs(dot), 0.0, 1.0));
+    return 2 * std::acos(std::clamp(std::abs(QuaternionDot(a, b)), 0.0, 1.0));
+}
+
+inline Quaternion BlendRotation(Quaternion from, Quaternion to, double fraction) {
+    // Use the same hemisphere so a sign change never makes the panel spin.
+    if (QuaternionDot(from, to) < 0) to = {-to.w, -to.x, -to.y, -to.z};
+    const Quaternion q{from.w + (to.w - from.w) * fraction, from.x + (to.x - from.x) * fraction,
+                       from.y + (to.y - from.y) * fraction, from.z + (to.z - from.z) * fraction};
+    const double inverse = 1 / std::sqrt(QuaternionDot(q, q));
+    return {q.w * inverse, q.x * inverse, q.y * inverse, q.z * inverse};
 }
 
 struct PointerPose {
@@ -76,18 +88,40 @@ inline PointerPose RelativePose(PointerPose device, PointerPose laser) {
 
 class GrabPose {
 public:
-    GrabPose(PointerPose start, V knuckle, std::optional<Quaternion> wrist)
-        : start_(start), pose_(start), knuckleStart_(knuckle), wristStart_(wrist) {}
+    GrabPose(PointerPose start, V knuckle, std::optional<Quaternion> wrist, int64_t captureNs, int64_t now)
+        : start_(start), pose_(start), knuckleStart_(knuckle), targetOrigin_(start.origin),
+          wristStart_(wrist), lastWrist_(wrist), lastSampleNs_(captureNs),
+          lastWristNs_(captureNs), lastStepNs_(now) {}
 
-    PointerPose Step(V knuckle, std::optional<Quaternion> wrist) {
+    PointerPose Step(V knuckle, std::optional<Quaternion> wrist, int64_t captureNs, int64_t now) {
         if (releaseUntil_) return pose_;
-        if (wrist) {
-            if (!wristStart_) wristStart_ = wrist;
-            wristDelta_ = *wrist * wristStart_->Conjugate();
+        if (captureNs > lastSampleNs_) {
+            // Pan with the hand and turn with the wrist independently of aim.
+            targetOrigin_ = start_.origin + (knuckle - knuckleStart_);
+            if (wrist) UpdateWrist(*wrist, captureNs);
+            else {
+                angularVelocity_ = {};
+                suspectWrist_.reset();
+            }
+            lastSampleNs_ = captureNs;
         }
-        // A grab behaves like a controller: translate with the hand and
-        // rotate with the wrist. Changes in laser aim do not steer it.
-        pose_ = {start_.origin + (knuckle - knuckleStart_), wristDelta_ * start_.rotation};
+        // Advance the panel between camera updates. Estimate wrist speed from
+        // fresh samples only, so polling a held frame cannot amplify jitter.
+        const double dt = std::clamp((now - lastStepNs_) / 1e9, 0.0, 0.04);
+        lastStepNs_ = now;
+        const V offset = targetOrigin_ - pose_.origin;
+        const double positionHz = std::min(5.0 + 15.0 * Length(offset), 9.0);
+        pose_.origin = pose_.origin + offset * Alpha(positionHz, dt);
+
+        const Quaternion target = wristDelta_ * start_.rotation;
+        const double angle = RotationDistance(pose_.rotation, target);
+        constexpr double kRestAngle = 0.012;  // about 0.7 degrees
+        if (angle > kRestAngle) {
+            const double turnSpeed = std::max(0.0, Length(angularVelocity_) - 0.65);
+            const double rotationHz = std::min(1.35 + 3.5 * turnSpeed, 10.0);
+            const double step = std::min(Alpha(rotationHz, dt) * (angle - kRestAngle), 9.0 * dt);
+            pose_.rotation = BlendRotation(pose_.rotation, target, step / angle);
+        }
         hasDragged_ = hasDragged_ || Length(pose_.origin - start_.origin) > 0.006 ||
                       RotationDistance(pose_.rotation, start_.rotation) > 0.017;
         return pose_;
@@ -101,13 +135,45 @@ public:
     bool Released() const { return releaseUntil_ != 0; }
     bool HoldingRelease(int64_t now) const { return Released() && now < releaseUntil_; }
     const PointerPose &Pose() const { return pose_; }
-    double WristAngle() const { return RotationDistance({1, 0, 0, 0}, wristDelta_); }
+    double WristAngle() const { return RotationDistance(start_.rotation, pose_.rotation); }
 
 private:
+    static double Alpha(double hz, double dt) { return -std::expm1(-6.283185307179586 * hz * dt); }
+
+    void UpdateWrist(Quaternion wrist, int64_t captureNs) {
+        if (!wristStart_) wristStart_ = wrist;
+        if (lastWrist_) {
+            const double dt = std::clamp((captureNs - lastWristNs_) / 1e9, 0.001, 0.10);
+            const double angle = RotationDistance(*lastWrist_, wrist);
+            // Require a second agreeing sample for a sudden wrist jump. This
+            // rejects a one-frame tracking flip without discarding real turns.
+            if (angle > 0.40 + 7.0 * dt &&
+                (!suspectWrist_ || RotationDistance(*suspectWrist_, wrist) > 0.30)) {
+                suspectWrist_ = wrist;
+                angularVelocity_ = {};
+                return;
+            }
+            Quaternion change = wrist * lastWrist_->Conjugate();
+            if (change.w < 0) change = {-change.w, -change.x, -change.y, -change.z};
+            const V axis{change.x, change.y, change.z};
+            const double length = Length(axis);
+            const V velocity = length > 1e-8 ? axis * (angle / (length * dt)) : V{};
+            // A signed rate cancels alternating jitter instead of classing
+            // each reversal as a fast, deliberate turn.
+            angularVelocity_ = angularVelocity_ + (velocity - angularVelocity_) * Alpha(2.0, dt);
+        }
+        suspectWrist_.reset();
+        lastWrist_ = wrist;
+        lastWristNs_ = captureNs;
+        wristDelta_ = wrist * wristStart_->Conjugate();
+    }
+
     PointerPose start_, pose_;
-    V knuckleStart_;
+    V knuckleStart_, targetOrigin_, angularVelocity_{};
     Quaternion wristDelta_{1, 0, 0, 0};
     std::optional<Quaternion> wristStart_;
+    std::optional<Quaternion> lastWrist_, suspectWrist_;
+    int64_t lastSampleNs_, lastWristNs_, lastStepNs_;
     bool hasDragged_ = false;
     int64_t releaseUntil_ = 0;
 };
