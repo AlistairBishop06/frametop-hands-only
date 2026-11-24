@@ -30,6 +30,7 @@ using pointer_pose::AimRay;
 using pointer_pose::AimRotation;
 using pointer_pose::Dot;
 using pointer_pose::GrabPose;
+using pointer_pose::GrabSample;
 using pointer_pose::HandAim;
 using pointer_pose::Length;
 using pointer_pose::PointerPose;
