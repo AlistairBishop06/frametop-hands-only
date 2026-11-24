@@ -53,17 +53,6 @@ inline std::optional<Quaternion> WristRotation(V forward, V across) {
     return AimRotation(forward) * Quaternion{std::cos(roll), 0, 0, std::sin(roll)};
 }
 
-inline Quaternion BlendRotation(Quaternion from, Quaternion to, double alpha) {
-    // A quaternion and its negation are the same rotation. Blend along the
-    // short path so crossing the sign boundary cannot spin the window.
-    if (from.w*to.w + from.x*to.x + from.y*to.y + from.z*to.z < 0)
-        to = {-to.w, -to.x, -to.y, -to.z};
-    const Quaternion q{from.w + (to.w-from.w)*alpha, from.x + (to.x-from.x)*alpha,
-                       from.y + (to.y-from.y)*alpha, from.z + (to.z-from.z)*alpha};
-    const double n = std::sqrt(q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z);
-    return {q.w/n, q.x/n, q.y/n, q.z/n};
-}
-
 inline double RotationDistance(Quaternion a, Quaternion b) {
     const double dot = a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z;
     return 2 * std::acos(std::clamp(std::abs(dot), 0.0, 1.0));
@@ -87,26 +76,20 @@ inline PointerPose RelativePose(PointerPose device, PointerPose laser) {
 
 class GrabPose {
 public:
-    GrabPose(PointerPose start, std::optional<Quaternion> wrist) : pose_(start), wristStart_(wrist) {}
+    GrabPose(PointerPose start, V knuckle, std::optional<Quaternion> wrist)
+        : start_(start), pose_(start), knuckleStart_(knuckle), wristStart_(wrist) {}
 
-    PointerPose Step(PointerPose aim, std::optional<Quaternion> wrist, double dt) {
+    PointerPose Step(V knuckle, std::optional<Quaternion> wrist) {
         if (releaseUntil_) return pose_;
         if (wrist) {
             if (!wristStart_) wristStart_ = wrist;
             wristDelta_ = *wrist * wristStart_->Conjugate();
         }
-        // Smooth the full pose: angular jitter also moves a distant window
-        // sideways. Raise the cutoff for a deliberate move or turn.
-        const V offset = aim.origin - pose_.origin;
-        const Quaternion rotation = wristDelta_ * aim.rotation;
-        const double positionHz = std::min(1.6 + 12.0 * Length(offset), 5.0);
-        const double rotationHz = std::min(1.5 + 4.0 * RotationDistance(pose_.rotation, rotation), 5.0);
-        const auto alpha = [dt](double hz) {
-            return -std::expm1(-6.283185307179586 * hz * std::clamp(dt, 0.0, 0.05));
-        };
-        pose_.origin = pose_.origin + offset * alpha(positionHz);
-        pose_.rotation = BlendRotation(pose_.rotation, rotation, alpha(rotationHz));
-        hasDragged_ = true;
+        // A grab behaves like a controller: translate with the hand and
+        // rotate with the wrist. Changes in laser aim do not steer it.
+        pose_ = {start_.origin + (knuckle - knuckleStart_), wristDelta_ * start_.rotation};
+        hasDragged_ = hasDragged_ || Length(pose_.origin - start_.origin) > 0.006 ||
+                      RotationDistance(pose_.rotation, start_.rotation) > 0.017;
         return pose_;
     }
 
@@ -121,7 +104,8 @@ public:
     double WristAngle() const { return RotationDistance({1, 0, 0, 0}, wristDelta_); }
 
 private:
-    PointerPose pose_;
+    PointerPose start_, pose_;
+    V knuckleStart_;
     Quaternion wristDelta_{1, 0, 0, 0};
     std::optional<Quaternion> wristStart_;
     bool hasDragged_ = false;
