@@ -2,9 +2,12 @@
 
 FrameHands brings camera-based hand tracking to the Steam Frame. It tracks both hands using the headset's cameras and shows them in SteamVR. It is a standalone fork of [Frametop](https://github.com/DeeJanuz/frametop) and does not replace the normal SteamVR dashboard.
 
-## Video
+## Videos
 
 https://github.com/user-attachments/assets/c54dd16b-259a-4c39-ab1a-a1fc931f3f94
+
+
+https://github.com/user-attachments/assets/5018c196-aec9-4d24-bae9-d963316f9b3a
 
 ## What it does
 
