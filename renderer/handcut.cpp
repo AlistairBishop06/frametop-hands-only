@@ -183,6 +183,7 @@ void Hands::Ingest(const fh_hands_t &v1, const fh_hand_fit_t *fits, const fh_ges
             o.tracked = in.flags & FH_PINCH_TRACKED, o.down = in.flags & FH_PINCH_DOWN, o.lost = in.flags & FH_PINCH_LOST;
             o.handId = in.hand_id, o.begins = in.begins, o.ends = in.ends;
             o.beginNs = int64_t(in.begin_ns), o.endNs = int64_t(in.end_ns);
+            o.captureNs = int64_t(g->capture_ns);
             o.distance = in.distance, o.strength = in.strength;
             if (Finite(in.point, 3)) Apply(head, in.point, o.point);
             if (Finite(in.begin_point, 3)) Apply(HeadAt(o.beginNs), in.begin_point, o.beginPoint);

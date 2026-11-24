@@ -86,7 +86,7 @@ struct Hand {
 struct Gesture {
     bool tracked = false, down = false, lost = false;
     uint32_t handId = 0, begins = 0, ends = 0;
-    int64_t beginNs = 0, endNs = 0;
+    int64_t beginNs = 0, endNs = 0, captureNs = 0;
     float distance = 0, strength = 0;
     float point[3] = {}, beginPoint[3] = {};
 };

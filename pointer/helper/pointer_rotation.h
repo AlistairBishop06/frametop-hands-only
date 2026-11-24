@@ -86,32 +86,51 @@ inline PointerPose RelativePose(PointerPose device, PointerPose laser) {
     return {Rotate(inverse, laser.origin - device.origin), inverse * laser.rotation};
 }
 
+struct GrabSample {
+    V knuckle;
+    V head;
+    std::optional<Quaternion> wrist;
+    int64_t captureNs;
+    bool stereo;
+};
+
 class GrabPose {
 public:
-    GrabPose(PointerPose start, V knuckle, std::optional<Quaternion> wrist, int64_t captureNs, int64_t now)
-        : start_(start), pose_(start), knuckleStart_(knuckle), targetOrigin_(start.origin),
-          wristStart_(wrist), lastWrist_(wrist), lastSampleNs_(captureNs),
-          lastWristNs_(captureNs), lastStepNs_(now) {}
+    GrabPose(PointerPose start, const GrabSample &sample, int64_t now)
+        : start_(start), pose_(start), targetOrigin_(start.origin),
+          lastKnuckle_(sample.knuckle), stereo_(sample.stereo),
+          wristStart_(sample.wrist), lastWrist_(sample.wrist),
+          lastSampleNs_(sample.captureNs), lastStepNs_(now) {}
 
-    PointerPose Step(V knuckle, std::optional<Quaternion> wrist, int64_t captureNs, int64_t now) {
+    PointerPose Step(const GrabSample &sample, int64_t now) {
         if (releaseUntil_) return pose_;
-        if (captureNs > lastSampleNs_) {
-            // Pan with the hand and turn with the wrist independently of aim.
-            targetOrigin_ = start_.origin + (knuckle - knuckleStart_);
-            if (wrist) UpdateWrist(*wrist, captureNs);
-            else {
-                angularVelocity_ = {};
-                suspectWrist_.reset();
+        if (sample.captureNs > lastSampleNs_) {
+            const double dt = (sample.captureNs - lastSampleNs_) / 1e9;
+            if (sample.stereo != stereo_ || dt > 0.14) {
+                // A different camera solution or a gap can shift the whole
+                // measured hand. Resume from it with the existing grab offset.
+                lastKnuckle_ = sample.knuckle;
+                stereo_ = sample.stereo;
+                suspectKnuckle_.reset();
+                RebaseWrist(sample.wrist);
+            } else {
+                UpdatePosition(sample, dt);
+                if (sample.wrist && lastWrist_) UpdateWrist(*sample.wrist, dt);
+                else RebaseWrist(sample.wrist);
             }
-            lastSampleNs_ = captureNs;
+            lastSampleNs_ = sample.captureNs;
         }
         // Advance the panel between camera updates. Estimate wrist speed from
         // fresh samples only, so polling a held frame cannot amplify jitter.
         const double dt = std::clamp((now - lastStepNs_) / 1e9, 0.0, 0.04);
         lastStepNs_ = now;
         const V offset = targetOrigin_ - pose_.origin;
-        const double positionHz = std::min(5.0 + 15.0 * Length(offset), 9.0);
-        pose_.origin = pose_.origin + offset * Alpha(positionHz, dt);
+        const double distance = Length(offset);
+        const double positionHz = std::min(5.0 + 15.0 * distance, 9.0);
+        if (distance > 0) {
+            const double advance = std::min(Alpha(positionHz, dt) * distance, 2.0 * dt);
+            pose_.origin = pose_.origin + offset * (advance / distance);
+        }
 
         const Quaternion target = wristDelta_ * start_.rotation;
         const double angle = RotationDistance(pose_.rotation, target);
@@ -119,7 +138,9 @@ public:
         if (angle > kRestAngle) {
             const double turnSpeed = std::max(0.0, Length(angularVelocity_) - 0.65);
             const double rotationHz = std::min(1.35 + 3.5 * turnSpeed, 10.0);
-            const double step = std::min(Alpha(rotationHz, dt) * (angle - kRestAngle), 9.0 * dt);
+            // SteamVR rotates the controller-to-window offset along with the
+            // controller. A sudden change of angle can throw a distant panel.
+            const double step = std::min(Alpha(rotationHz, dt) * (angle - kRestAngle), 4.0 * dt);
             pose_.rotation = BlendRotation(pose_.rotation, target, step / angle);
         }
         hasDragged_ = hasDragged_ || Length(pose_.origin - start_.origin) > 0.006 ||
@@ -134,46 +155,79 @@ public:
     }
     bool Released() const { return releaseUntil_ != 0; }
     bool HoldingRelease(int64_t now) const { return Released() && now < releaseUntil_; }
+    bool HasDragged() const { return hasDragged_; }
     const PointerPose &Pose() const { return pose_; }
     double WristAngle() const { return RotationDistance(start_.rotation, pose_.rotation); }
 
 private:
     static double Alpha(double hz, double dt) { return -std::expm1(-6.283185307179586 * hz * dt); }
 
-    void UpdateWrist(Quaternion wrist, int64_t captureNs) {
-        if (!wristStart_) wristStart_ = wrist;
-        if (lastWrist_) {
-            const double dt = std::clamp((captureNs - lastWristNs_) / 1e9, 0.001, 0.10);
-            const double angle = RotationDistance(*lastWrist_, wrist);
-            // Require a second agreeing sample for a sudden wrist jump. This
-            // rejects a one-frame tracking flip without discarding real turns.
-            if (angle > 0.40 + 7.0 * dt &&
-                (!suspectWrist_ || RotationDistance(*suspectWrist_, wrist) > 0.30)) {
+    static V PositionDelta(V from, const GrabSample &sample) {
+        const V delta = sample.knuckle - from;
+        if (sample.stereo) return delta;
+        // A single camera can track across the view, but it estimates range.
+        // Discard motion along the sightline until stereo depth returns.
+        const V sightline = (sample.knuckle + from) * 0.5 - sample.head;
+        const double rangeSquared = Dot(sightline, sightline);
+        return rangeSquared > 1e-6 ?
+            delta - sightline * (Dot(delta, sightline) / rangeSquared) : V{};
+    }
+
+    void UpdatePosition(const GrabSample &sample, double dt) {
+        const V delta = PositionDelta(lastKnuckle_, sample);
+        const double maxStep = 0.022 + 2.5 * dt;
+        if (Length(delta) <= maxStep) {
+            targetOrigin_ = targetOrigin_ + delta;
+        } else if (!suspectKnuckle_ || Length(PositionDelta(*suspectKnuckle_, sample)) > maxStep) {
+            suspectKnuckle_ = sample.knuckle;
+            return;
+        }
+        // A second sample at the displaced location confirms a new baseline,
+        // without adding the jump to the window's position.
+        lastKnuckle_ = sample.knuckle;
+        suspectKnuckle_.reset();
+    }
+
+    void RebaseWrist(std::optional<Quaternion> wrist) {
+        wristStart_ = wrist ? std::optional{wristDelta_.Conjugate() * *wrist} : std::nullopt;
+        lastWrist_ = wrist;
+        suspectWrist_.reset();
+        angularVelocity_ = {};
+    }
+
+    void UpdateWrist(Quaternion wrist, double dt) {
+        const double angle = RotationDistance(*lastWrist_, wrist);
+        const double maxStep = 0.16 + 6.0 * dt;
+        if (angle > maxStep) {
+            if (suspectWrist_ && RotationDistance(*suspectWrist_, wrist) <= maxStep)
+                RebaseWrist(wrist);
+            else {
                 suspectWrist_ = wrist;
                 angularVelocity_ = {};
-                return;
             }
-            Quaternion change = wrist * lastWrist_->Conjugate();
-            if (change.w < 0) change = {-change.w, -change.x, -change.y, -change.z};
-            const V axis{change.x, change.y, change.z};
-            const double length = Length(axis);
-            const V velocity = length > 1e-8 ? axis * (angle / (length * dt)) : V{};
-            // A signed rate cancels alternating jitter instead of classing
-            // each reversal as a fast, deliberate turn.
-            angularVelocity_ = angularVelocity_ + (velocity - angularVelocity_) * Alpha(2.0, dt);
+            return;
         }
+        Quaternion change = wrist * lastWrist_->Conjugate();
+        if (change.w < 0) change = {-change.w, -change.x, -change.y, -change.z};
+        const V axis{change.x, change.y, change.z};
+        const double length = Length(axis);
+        const V velocity = length > 1e-8 ? axis * (angle / (length * std::max(dt, 0.001))) : V{};
+        // A signed rate cancels alternating jitter instead of classing
+        // each reversal as a fast, deliberate turn.
+        angularVelocity_ = angularVelocity_ + (velocity - angularVelocity_) * Alpha(2.0, dt);
         suspectWrist_.reset();
         lastWrist_ = wrist;
-        lastWristNs_ = captureNs;
         wristDelta_ = wrist * wristStart_->Conjugate();
     }
 
     PointerPose start_, pose_;
-    V knuckleStart_, targetOrigin_, angularVelocity_{};
+    V targetOrigin_, lastKnuckle_, angularVelocity_{};
+    std::optional<V> suspectKnuckle_;
+    bool stereo_;
     Quaternion wristDelta_{1, 0, 0, 0};
     std::optional<Quaternion> wristStart_;
     std::optional<Quaternion> lastWrist_, suspectWrist_;
-    int64_t lastSampleNs_, lastWristNs_, lastStepNs_;
+    int64_t lastSampleNs_, lastStepNs_;
     bool hasDragged_ = false;
     int64_t releaseUntil_ = 0;
 };

@@ -257,6 +257,7 @@ int main() {
     constexpr int64_t kGrabLockLeadNs = 30'000'000ll;
     constexpr int64_t kClickHoldNs = 55'000'000ll;
     constexpr int64_t kGrabStartHoldNs = 35'000'000ll;
+    constexpr int64_t kGestureStaleNs = 300'000'000ll;
     constexpr int64_t kAimLossHoldNs = 100'000'000ll;
     constexpr int64_t kPendingTimeoutNs = 600'000'000ll;
     while (vr::VRSystem()->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd)) {
@@ -318,10 +319,13 @@ int main() {
             grabPose.reset();
         if (pressed && grabPose) {
             const auto &g = hands.pinch(owner);
+            const bool pinchEnded = !g.down || g.handId != grabHandId || now - g.captureNs > kGestureStaleNs;
+            // Keep a live drag attached past the timeout for an idle press.
+            const bool idlePressExpired = !grabPose->HasDragged() && now - g.beginNs > 4'000'000'000ll;
             // Release before generating another pose so finger opening or
             // disappearing cannot move the window away from its last drag pose.
             if (pick != owner || side[owner]->id != grabHandId ||
-                (now - pressAt > 50'000'000ll && (!g.down || now - g.beginNs > 4'000'000'000ll)))
+                (now - pressAt > 50'000'000ll && (pinchEnded || idlePressExpired)))
                 releasePinch(now);
         }
         const bool holdingRelease = grabPose && grabPose->HoldingRelease(now);
@@ -573,7 +577,8 @@ int main() {
                 const PointerPose laser{clickAim.origin, AimRotation(clickAim.direction)};
                 PointerPose device = grabPose ? grabPose->Pose() : laser;
                 const auto wrist = [&](bool fitted) {
-                    if (fitted) return WristRotation(Point(sample.wristForward), Point(sample.wristRight));
+                    if (fitted) return sample.fit ?
+                        WristRotation(Point(sample.wristForward), Point(sample.wristRight)) : std::nullopt;
                     const V across = Point(sample.p[17]) - Point(sample.p[5]);
                     return WristRotation(Point(sample.p[9]) - Point(sample.p[0]), sample.right ? across : across * -1);
                 };
@@ -581,7 +586,8 @@ int main() {
                     // Keep the last wrist contribution if a sample is missing.
                     const auto trackedWrist = g.down && sample.id == grabHandId ?
                         wrist(grabUsesFittedWrist) : std::nullopt;
-                    device = grabPose->Step(knuckle, trackedWrist, sample.captureNs, now);
+                    device = grabPose->Step({knuckle, Position(captureHead), trackedWrist,
+                                             sample.captureNs, sample.stereo}, now);
                     if (debug && now >= nextGrabReport) {
                         ReportGrabPose(h.right, dashboard, grabPose->WristAngle(), sentRotation, poses);
                         nextGrabReport = now + 500'000'000ll;
@@ -634,8 +640,8 @@ int main() {
                                 // use different axes. Keep one source per grab.
                                 const auto fitted = wrist(true);
                                 grabUsesFittedWrist = fitted.has_value();
-                                grabPose.emplace(device, knuckle, fitted ? fitted : wrist(false),
-                                                 sample.captureNs, now);
+                                grabPose.emplace(device, GrabSample{knuckle, Position(captureHead),
+                                                 fitted ? fitted : wrist(false), sample.captureNs, sample.stereo}, now);
                                 grabHandId = sample.id;
                                 nextGrabReport = 0;
                             }
