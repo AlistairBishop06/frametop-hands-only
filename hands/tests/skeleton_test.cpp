@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <random>
+#include <sstream>
 
 using namespace skel;
 
@@ -151,6 +152,49 @@ int main() {
         // the left hand borrows the right's lengths until it has its own
         const Shape left = sk.shape(-1, 1.0);
         CHECK(std::fabs(left.len[5] - got.len[5]) < 1e-9);
+    }
+
+    // Guided calibration uses open, stereo observations of the selected hand.
+    {
+        Skeleton sk;
+        Calibration sample;
+        sk.capture_calibration(1, &sample);
+        const Shape truth = Skeleton::canonical(1.18);
+        const Rot rotation = exp_rot({0.3, 0.2, 0.1});
+        const V3 wrist{0.12, -0.2, -0.38};
+        double q[kParams]{};
+        V3 pts[21];
+        Rot frames[21];
+        Fit right, left;
+        int64_t ns = 1'000'000'000;
+
+        Skeleton::pose(truth, -1, rotation, wrist, q, pts, frames);
+        sk.update(left, pts, false, 0.05, 2, 0.001, nullptr, {}, 1, ns += 33'000'000);
+        q[9] = 75 * M_PI / 180;
+        Skeleton::pose(truth, 1, rotation, wrist, q, pts, frames);
+        sk.update(right, pts, true, 0.95, 2, 0.001, nullptr, {}, 1, ns += 33'000'000);
+        q[9] = 0;
+        Skeleton::pose(truth, 1, rotation, wrist, q, pts, frames);
+        sk.update(right, pts, true, 0.95, 1, -1, nullptr, {}, 1, ns += 33'000'000);
+        CHECK(sample.samples(0) == 0);
+
+        for (int i = 0; i < Calibration::kSettle; ++i)
+            sk.update(right, pts, true, 0.95, 2, 0.001, nullptr, {}, 1, ns += 33'000'000);
+        CHECK(sample.settled() == 1);
+        sk.capture_calibration(0, nullptr);
+        std::stringstream profile;
+        sample.save(profile);
+        Calibration loaded;
+        CHECK(loaded.load(profile));
+        Skeleton fresh;
+        fresh.use_calibration({}, loaded);
+        CHECK(fresh.calibration(1).settled() == 1);
+        const Shape saved = fresh.shape(1, 1.0);
+        for (int b = 0; b < 20; ++b) CHECK(std::abs(saved.len[b] - truth.len[b]) < 0.00001);
+        std::istringstream invalid("0 0 0\n");
+        CHECK(!loaded.load(invalid) && loaded.settled() == 1);
+        fresh.use_calibration({}, {});
+        CHECK(fresh.calibration(1).settled() == 0);
     }
 
     // a left hand stuck fitted as a right one (the mirror won while its fingers were straight)

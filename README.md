@@ -12,9 +12,10 @@ https://github.com/user-attachments/assets/5018c196-aec9-4d24-bae9-d963316f9b3a
 ## What it does
 
 - Shows tracked 3D hands in SteamVR, with eight colour presets and adjustable smoothing.
-- Lets you point, pinch to click, drag, and optionally touch supported dashboard panels with your fingertips.
+- Offers three dashboard interaction modes: **Aim & Pinch**, **Direct Touch**, and **Gaze Assisted**. Gaze Assisted follows the centre of your headset view and clicks when you pinch.
 - Adds wrist rotation to pinch drags so SteamVR can tilt a floating window from its grab handle.
 - Provides a FrameHands dashboard panel to control tracking, hand visuals, touch, and updates.
+- Saves a personal hand shape through **Calibrate hands** in the dashboard.
 - Can pause tracking while a local VR game is active. Detection of PC-streamed games is not yet reliable.
 
 FrameHands does not yet provide native hand controls or skeletal input to VR games such as *Half-Life: Alyx*.
@@ -40,4 +41,4 @@ cd ~/frametop-hands-only
 ./uninstall.sh
 ```
 
-This removes the FrameHands app, launcher, services, and SteamVR registration while keeping your settings. To also remove saved settings and cached models, run `./uninstall.sh --config --models`; the script asks before deleting them. SteamVR and Frametop are unaffected.
+This removes the FrameHands app, launcher, services, and SteamVR registration while keeping your settings and hand calibration. To also remove those files and cached models, run `./uninstall.sh --config --models`; the script asks before deleting your settings. SteamVR and Frametop are unaffected.

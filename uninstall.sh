@@ -13,7 +13,7 @@ for arg in "$@"; do
   esac
 done
 if (( purge_config && ! yes )); then
-  read -r -p 'Delete ~/.config/framehands/config? [y/N] ' answer || answer=
+  read -r -p 'Delete FrameHands settings and hand calibration in ~/.config/framehands? [y/N] ' answer || answer=
   [[ $answer == y || $answer == Y ]] || purge_config=0
 fi
 if (( purge_models && ! yes )); then

@@ -1,4 +1,4 @@
-#include "../helper/pointer_aim.h"
+#include "../helper/gaze_pointer.h"
 
 #include <cassert>
 #include <iostream>
@@ -215,11 +215,56 @@ static void CheckGrabReacquisition() {
     assert(RotationDistance(grab.Pose().rotation, Roll(0.56) * Pitch(0.56)) < 0.025);
 }
 
+static void CheckGaze() {
+    const auto first = HeadGazeRay({0, 1.6, 0}, {0, 0, -1}).value();
+    const auto moved = HeadGazeRay({0.02, 1.6, 0}, {0.4, 0, -0.8}).value();
+    assert(!HeadGazeRay({}, {}));
+    assert(Length(Rotate(AimRotation(moved.direction), {0, 0, -1}) - moved.direction) < 1e-8);
+    GazeClick gaze;
+    GazeHand hands[2]{};
+    int64_t now = 1'000'000'000;
+
+    // Hover follows the head before any hand is available.
+    auto result = gaze.Step(first, hands, false, now);
+    assert(!AimMoved(first, result.ray) && result.button == GazeButton::None);
+    // A quick pinch can start and finish between polls. Queue the click on
+    // the displayed target while SteamVR is still claiming the cursor.
+    now += 11'000'000;
+    hands[1] = {1, 12, now, true, false};
+    result = gaze.Step(moved, hands, false, now);
+    assert(!AimMoved(first, result.ray) && result.button == GazeButton::None);
+    now += 33'000'000;
+    result = gaze.Step(moved, hands, true, now);
+    assert(!AimMoved(first, result.ray) && result.button == GazeButton::Down);
+    result = gaze.Step(moved, hands, true, now + 33'000'000);
+    assert(gaze.Pressed() && result.button == GazeButton::None);
+    now += 55'000'000;
+    result = gaze.Step(moved, hands, true, now);
+    assert(!gaze.Pressed() && !AimMoved(first, result.ray) && result.button == GazeButton::Up);
+    now += 60'000'000;
+    result = gaze.Step(moved, hands, true, now);
+    assert(!AimMoved(moved, result.ray) && result.button == GazeButton::None);
+
+    // An old or already-held pinch cannot click when gaze takes control.
+    gaze.Reset();
+    hands[0] = {9, 10, now, true, true};
+    assert(gaze.Step(moved, hands, true, now).button == GazeButton::None);
+    hands[1] = {2, 12, now - 500'000'000, true, true};
+    assert(gaze.Step(moved, hands, true, now + 12'000'000).button == GazeButton::None);
+    // Either hand can click. Losing the pressed hand releases the button.
+    now += 24'000'000;
+    hands[0] = {10, 10, now, true, true};
+    assert(gaze.Step(moved, hands, true, now).button == GazeButton::Down);
+    hands[0].eligible = false;
+    assert(gaze.Step(first, hands, true, now + 60'000'000).button == GazeButton::Up);
+}
+
 int main() {
     CheckAim();
     CheckGrabJitter(3);  // 30 Hz cameras
     CheckGrabJitter(6);  // 15 Hz cameras
     CheckGrab();
     CheckGrabReacquisition();
-    std::cout << "Pointer aim, window jitter, reacquisition, deliberate turns, and release checks passed\n";
+    CheckGaze();
+    std::cout << "Pointer aim, window grabs, gaze hover, and pinch click checks passed\n";
 }

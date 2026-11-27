@@ -58,6 +58,7 @@
 #include "../../config/ft_conf.h"
 #include "flagbuf.h"
 #include "frame_pair.h"
+#include "guided_calibration.h"
 #include "io.h"
 #include "pinch.h"
 #include "record.h"
@@ -597,6 +598,8 @@ int main(int argc, char **argv) {
     tracker.set_pair_sides(pair_sides);
     tracker.set_hold(reacquire > 0 ? hold : 0.3);
     tracker.set_skeleton(skeleton);
+    std::optional<hand_calibration::Session> handCalibration;
+    if (publish && skeleton) handCalibration.emplace(tracker.skeleton());
     std::map<std::string, std::vector<uint8_t>> pixels;
     // A mono set is the side pair's newer frames (all the mono cameras' without both sides) with
     // the upper pair's from the same moment. XRService keeps the uppers in step with the sides,
@@ -866,6 +869,7 @@ int main(int argc, char **argv) {
     while (!g_stop && (seconds <= 0 || (mono_ns() - start) / 1e9 < seconds)) {
         if (mono_ns() - t_flag_check > 250'000'000) {
             t_flag_check = mono_ns();
+            if (handCalibration) handCalibration->Poll(t_flag_check);
             if (stat(flag_file.c_str(), &flag_st) == 0 && flag_st.st_uid == getuid()) take_flag();
             if (flags) {
                 flags->tick(int64_t(mono_ns()) + raw_minus_mono_ns());

@@ -1,7 +1,9 @@
 // Dashboard and undocked-panel pointer. The SteamVR driver remains disconnected
 // until a bare hand is available for overlay input; no game input is synthesized.
 #include "../../config/ftsock.h"
+#include "../../config/interaction_mode.h"
 #include "../../renderer/handcut.h"
+#include "gaze_pointer.h"
 #include "pointer_aim.h"
 
 #include <openvr.h>
@@ -25,13 +27,19 @@
 
 namespace {
 using Clock = std::chrono::steady_clock;
+using framehands::InteractionMode;
+using framehands::ReadInteractionMode;
 using pointer_pose::AimMoved;
 using pointer_pose::AimRay;
 using pointer_pose::AimRotation;
 using pointer_pose::Dot;
+using pointer_pose::GazeButton;
+using pointer_pose::GazeClick;
+using pointer_pose::GazeHand;
 using pointer_pose::GrabPose;
 using pointer_pose::GrabSample;
 using pointer_pose::HandAim;
+using pointer_pose::HeadGazeRay;
 using pointer_pose::Length;
 using pointer_pose::PointerPose;
 using pointer_pose::Quaternion;
@@ -121,6 +129,51 @@ bool PhysicalControllerBusy(const vr::TrackedDevicePose_t *poses, const handcut:
     }
     return false;
 }
+
+struct GazeControllers {
+    bool busy = false;
+    int freeSide = 1;
+};
+
+GazeControllers CheckGazeControllers(const vr::TrackedDevicePose_t *poses, Controller *state, int64_t now) {
+    GazeControllers result;
+    bool physical[2]{};
+    for (vr::TrackedDeviceIndex_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {
+        if (!poses[i].bPoseIsValid || poses[i].eTrackingResult != vr::TrackingResult_Running_OK ||
+            vr::VRSystem()->GetTrackedDeviceClass(i) != vr::TrackedDeviceClass_Controller) continue;
+        char type[64]{};
+        vr::VRSystem()->GetStringTrackedDeviceProperty(i, vr::Prop_ControllerType_String, type, sizeof type);
+        if (!std::strcmp(type, "fh_pointer")) continue;
+        const auto role = vr::VRSystem()->GetControllerRoleForTrackedDeviceIndex(i);
+        if (role == vr::TrackedControllerRole_LeftHand) physical[0] = true;
+        if (role == vr::TrackedControllerRole_RightHand) physical[1] = true;
+        vr::VRControllerState_t input{};
+        const bool pressed = vr::VRSystem()->GetControllerState(i, &input, sizeof input) && input.ulButtonPressed;
+        const auto &velocity = poses[i].vVelocity.v;
+        const auto &angular = poses[i].vAngularVelocity.v;
+        if (pressed || Length({velocity[0], velocity[1], velocity[2]}) > 0.07 ||
+            Length({angular[0], angular[1], angular[2]}) > 0.20)
+            state[i].busyUntil = now + 1'500'000'000ll;
+        result.busy = result.busy || now < state[i].busyUntil;
+    }
+    if (physical[1] && !physical[0]) result.freeSide = 0;
+    return result;
+}
+
+bool FloatingGazeAllowed() {
+    auto *apps = vr::VRApplications();
+    if (!apps) return false;
+    const auto state = apps->GetSceneApplicationState();
+    if (state == vr::EVRSceneApplicationState_Starting || state == vr::EVRSceneApplicationState_Quitting)
+        return false;
+    const uint32_t pid = apps->GetCurrentSceneProcessId();
+    if (!pid) return state == vr::EVRSceneApplicationState_None;
+    char key[256]{};
+    if (apps->GetApplicationKeyByProcessId(pid, key, sizeof key) != vr::VRApplicationError_None) return false;
+    // A persistent scene can be a VR game or the Steam Link client. Outside
+    // the dashboard, claim the gaze cursor only in the shell or SteamVR Home.
+    return !std::strcmp(key, "steam.app.250820") || !std::strcmp(key, "openvr.tool.steamvr_environments");
+}
 }
 
 // Steam Frame's floated gamescope panels use keys such as
@@ -200,9 +253,11 @@ int main() {
     if (fd < 0) return std::perror("fh-input socket"), 1;
     handcut::Hands hands;
     HandAim aim;
+    GazeClick gazeClick;
     Controller controllers[vr::k_unMaxTrackedDeviceCount]{};
     bool floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
-    bool touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
+    InteractionMode mode = ReadInteractionMode();
+    bool touchOn = mode == InteractionMode::Touch;
     bool touchDebug = handcut::Setting("HANDS_TOUCH_DEBUG", "0") == "1";
     bool debug = handcut::Setting("DEBUG", "0") == "1";
     auto pointerSmoothness = [] {
@@ -211,6 +266,8 @@ int main() {
     int smoothness = pointerSmoothness();
     int64_t nextSettings = 0;
     int64_t nextOverlayScan = 0;
+    int64_t nextGazeScene = 0;
+    bool floatingGaze = false;
     std::vector<std::string> overlayKeys;
     std::vector<vr::VROverlayHandle_t> observedOverlays;
     bool touchPressed = false;
@@ -254,6 +311,26 @@ int main() {
             if (!grabPose->Released()) grabPose.reset();
         }
     };
+    auto stopGaze = [&] {
+        if (gazeClick.Pressed()) Send(fd, "btn trigger 0");
+        gazeClick.Reset();
+        if (showing) Send(fd, "hide");
+        showing = false;
+        claimAt = claimedAt = 0;
+    };
+    auto showPointer = [&](int side, int64_t now) {
+        if (showing) return;
+        Send(fd, side ? "role right" : "role left");
+        showing = Send(fd, "show");
+        // Let SteamVR assign the input path before selecting its cursor.
+        if (showing) claimAt = now + 180'000'000ll;
+    };
+    auto claimPointer = [&](int64_t now) {
+        if (!showing || !claimAt || now < claimAt) return;
+        Send(fd, "btn a 1"); Send(fd, "btn a 0");
+        claimAt = 0;
+        claimedAt = now;
+    };
     // The physical trigger engages SteamVR's mouse lock before its click.
     constexpr int64_t kGrabLockLeadNs = 30'000'000ll;
     constexpr int64_t kClickHoldNs = 55'000'000ll;
@@ -261,8 +338,51 @@ int main() {
     constexpr int64_t kGestureStaleNs = 300'000'000ll;
     constexpr int64_t kAimLossHoldNs = 100'000'000ll;
     constexpr int64_t kPendingTimeoutNs = 600'000'000ll;
-    while (vr::VRSystem()->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd)) {
+    for (; vr::VRSystem()->IsTrackedDeviceConnected(vr::k_unTrackedDeviceIndex_Hmd);
+         std::this_thread::sleep_for(std::chrono::milliseconds(12))) {
         const int64_t now = NowNs();
+        vr::VREvent_t event;
+        while (vr::VRSystem()->PollNextEvent(&event, sizeof event)) {
+            if (event.eventType == vr::VREvent_Quit) goto done;
+            if (event.eventType == vr::VREvent_SceneApplicationStateChanged ||
+                event.eventType == vr::VREvent_SceneApplicationChanged) nextGazeScene = 0;
+            if (event.eventType == vr::VREvent_OverlayCreated ||
+                event.eventType == vr::VREvent_OverlayFocusChanged) {
+                const auto target = event.data.overlay.overlayHandle;
+                if (target != vr::k_ulOverlayHandleInvalid &&
+                    std::find(observedOverlays.begin(), observedOverlays.end(), target) == observedOverlays.end()) {
+                    if (observedOverlays.size() == 64) observedOverlays.erase(observedOverlays.begin());
+                    observedOverlays.push_back(target);
+                }
+            } else if (event.eventType == vr::VREvent_OverlayDestroyed) {
+                const auto target = event.data.overlay.overlayHandle;
+                observedOverlays.erase(std::remove(observedOverlays.begin(), observedOverlays.end(), target),
+                                       observedOverlays.end());
+            }
+        }
+        if (now >= nextSettings) {
+            nextSettings = now + 750'000'000ll;
+            floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
+            const auto selection = ReadInteractionMode();
+            if (selection != mode) {
+                if (pressed) Send(fd, "btn trigger 0");
+                releaseGrabLock();
+                stopGaze();
+                mode = selection;
+                touchOn = mode == InteractionMode::Touch;
+                pressed = touchPressed = clickDragging = false;
+                owner = heldOwner = -1;
+                pending[0] = pending[1] = seenSince[0] = seenSince[1] = 0;
+                initialized[0] = initialized[1] = false;
+                sentAt = clickReleaseUntil = touchReleaseAt = 0;
+                nextOverlayScan = nextGazeScene = 0;
+                aim.Reset();
+                grabPose.reset();
+            }
+            touchDebug = handcut::Setting("HANDS_TOUCH_DEBUG", "0") == "1";
+            debug = handcut::Setting("DEBUG", "0") == "1";
+            smoothness = pointerSmoothness();
+        }
         if (touchOn && now >= nextOverlayScan) {
             overlayKeys = TouchOverlayKeys();
             // Query SteamVR live as well as its last saved settings file.
@@ -275,25 +395,58 @@ int main() {
                 overlayKeys.emplace_back(activeKey);
             nextOverlayScan = now + 3'000'000'000ll;
         }
-        if (now >= nextSettings) {
-            nextSettings = now + 750'000'000ll;
-            floatPointer = handcut::Setting("HANDS_FLOATING_POINTER", "1") != "0";
-            touchOn = handcut::Setting("HANDS_TOUCH", "0") == "1";
-            touchDebug = handcut::Setting("HANDS_TOUCH_DEBUG", "0") == "1";
-            debug = handcut::Setting("DEBUG", "0") == "1";
-            smoothness = pointerSmoothness();
-        }
         vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
         vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0,
                                                         poses, vr::k_unMaxTrackedDeviceCount);
         const bool dashboard = vr::VROverlay()->IsDashboardVisible();
-        if (dashboard && !wasDashboard && showing) claimAt = now + 180'000'000ll;
+        if (mode == InteractionMode::Gaze && dashboard != wasDashboard) {
+            stopGaze();
+            nextGazeScene = 0;
+        } else if (dashboard && !wasDashboard && showing) claimAt = now + 180'000'000ll;
         wasDashboard = dashboard;
         const bool fresh = poses[0].bPoseIsValid && hands.Update(poses[0].mDeviceToAbsoluteTracking, now);
         const handcut::Hand *side[2]{};
         const handcut::Hand *measured[2]{};
         if (fresh) for (const auto &h : hands.shown()) side[h.right ? 1 : 0] = &h;
         if (fresh) for (const auto &h : hands.seen()) measured[h.right ? 1 : 0] = &h;
+        if (mode == InteractionMode::Gaze) {
+            if (!dashboard && floatPointer && now >= nextGazeScene) {
+                floatingGaze = FloatingGazeAllowed();
+                nextGazeScene = now + 250'000'000ll;
+            }
+            const auto &hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
+            if (!hmd.bPoseIsValid || (!dashboard && (!floatPointer || !floatingGaze))) {
+                stopGaze();
+                continue;
+            }
+            const auto physical = CheckGazeControllers(poses, controllers, now);
+            const auto &m = hmd.mDeviceToAbsoluteTracking.m;
+            const auto live = HeadGazeRay(Position(hmd.mDeviceToAbsoluteTracking), {-m[0][2], -m[1][2], -m[2][2]});
+            if (!live || physical.busy) {
+                stopGaze();
+                continue;
+            }
+            GazeHand pinch[2]{};
+            for (int s = 0; s < 2; ++s) {
+                const auto &g = hands.pinch(s);
+                bool eligible = false;
+                if (measured[s] && measured[s]->id == g.handId && g.tracked && !g.lost && !hands.grip(s).down) {
+                    const V knuckle = (Point(measured[s]->p[5]) + Point(measured[s]->p[9])) * 0.5;
+                    const V offset = knuckle - live->origin;
+                    eligible = offset.y > -0.50 && Dot(offset, live->direction) > 0.15;
+                }
+                pinch[s] = {g.begins, g.handId, g.captureNs, eligible, g.down};
+            }
+            const bool ready = showing && !claimAt && claimedAt && now - claimedAt >= 60'000'000ll;
+            const auto cursor = gazeClick.Step(*live, pinch, ready, now);
+            const PointerPose pose{cursor.ray.origin, AimRotation(cursor.ray.direction)};
+            SendPoses(fd, pose, pose);
+            showPointer(physical.freeSide, now);
+            claimPointer(now);
+            if (cursor.button == GazeButton::Down) Send(fd, "btn trigger 1");
+            else if (cursor.button == GazeButton::Up) Send(fd, "btn trigger 0");
+            continue;
+        }
         bool ready[2]{};
         for (int s = 0; s < 2; ++s) {
             const auto &g = hands.pinch(s);
@@ -597,18 +750,8 @@ int main() {
                 SendPoses(fd, laser, device);
                 sentRotation = device.rotation;
                 sentLaser = laser; sentAt = now; sentHandId = touchAim ? 0 : sample.id;
-                if (!showing) {
-                    Send(fd, owner ? "role right" : "role left");
-                    showing = Send(fd, "show");
-                    // Let SteamVR connect the pose and assign its input path
-                    // before asking the compositor to use this laser.
-                    if (showing) claimAt = now + 180'000'000ll;
-                }
-                if (!holdingRelease && showing && claimAt && now >= claimAt) {
-                    Send(fd, "btn a 1"); Send(fd, "btn a 0");
-                    claimAt = 0;
-                    claimedAt = now;
-                }
+                showPointer(owner, now);
+                if (!holdingRelease) claimPointer(now);
                 if (!holdingRelease && showing && !pressed && !grabLockAt && touchOn && touching && now >= touchReleaseAt) {
                     Send(fd, "btn trigger 1"); pressed = touchPressed = true; pressAt = now;
                 }
@@ -654,24 +797,6 @@ int main() {
                     releasePinch(now);
             }
         }
-        vr::VREvent_t event;
-        while (vr::VRSystem()->PollNextEvent(&event, sizeof event)) {
-            if (event.eventType == vr::VREvent_Quit) goto done;
-            if (event.eventType == vr::VREvent_OverlayCreated ||
-                event.eventType == vr::VREvent_OverlayFocusChanged) {
-                const auto target = event.data.overlay.overlayHandle;
-                if (target != vr::k_ulOverlayHandleInvalid &&
-                    std::find(observedOverlays.begin(), observedOverlays.end(), target) == observedOverlays.end()) {
-                    if (observedOverlays.size() == 64) observedOverlays.erase(observedOverlays.begin());
-                    observedOverlays.push_back(target);
-                }
-            } else if (event.eventType == vr::VREvent_OverlayDestroyed) {
-                const auto target = event.data.overlay.overlayHandle;
-                observedOverlays.erase(std::remove(observedOverlays.begin(), observedOverlays.end(), target),
-                                       observedOverlays.end());
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(12));
     }
 done:
     Send(fd, "btn trigger 0");

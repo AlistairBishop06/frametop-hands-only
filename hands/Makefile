@@ -24,7 +24,7 @@ LDFLAGS  ?= -static
 
 CAMD  = camd/camd.c camd/tp.c camd/xrcams.c
 TRACK = track/calib.cpp track/nets.cpp track/tracker.cpp track/io.cpp track/record.cpp track/pinch.cpp track/sides.cpp track/skeleton.cpp track/flagbuf.cpp
-HDR   = $(wildcard track/*.h) camd/fhring.h include/fh_hands.h include/fh_gestures.h ../config/ft_conf.h
+HDR   = $(wildcard track/*.h) camd/fhring.h include/fh_hands.h include/fh_gestures.h ../config/ft_conf.h ../config/hand_calibration.h
 
 all: build/fh-camd build/fh-hands
 

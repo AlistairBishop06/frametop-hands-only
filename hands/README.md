@@ -8,6 +8,8 @@
 
 Build and offline tests are in `Makefile`; run them through `bash scripts/build.sh` from the repository root on ARM64 Linux. The source retains offline recording structures used by the tracker and its tests, but no recorder app or upload system is installed.
 
+**Calibrate hands** guides the wearer through opening and turning each hand. The tracker measures palm shape and bone lengths from clean stereo views, saves the completed pair in `~/.config/framehands/hand-calibration`, and reuses it at startup. **Restore automatic calibration** clears the saved profile. Only measurements are saved.
+
 ## Measure tracking performance on the Frame
 
 ```sh

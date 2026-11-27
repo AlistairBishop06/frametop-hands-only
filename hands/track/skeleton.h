@@ -15,6 +15,7 @@
 #include "geom.h"
 
 #include <cstdint>
+#include <iosfwd>
 #include <vector>
 
 namespace skel {
@@ -55,6 +56,8 @@ public:
     Shape shape(const Shape &prior) const;
     double settled() const;   // 0..1: the least-sampled quantity's share of kSettle
     int samples(int k) const { return n_[k]; }
+    bool load(std::istream &in);
+    void save(std::ostream &out) const;
 
 private:
     std::vector<float> buf_[kQuantities];
@@ -115,6 +118,8 @@ public:
     // The head's up direction, for the arm model (default: the head frame's +y).
     void set_up(V3 up) { up_ = unit(up); }
     const Calibration &calibration(int side) const { return cal_[side > 0]; }
+    void use_calibration(const Calibration &left, const Calibration &right) { cal_[0] = left; cal_[1] = right; }
+    void capture_calibration(int side, Calibration *sample) { capture_side_ = side; capture_ = sample; }
     Shape shape(int side, double scale) const;   // the side's current estimate
     static Shape canonical(double scale);        // the model's average hand, times scale
     const Params &params() const { return p_; }
@@ -138,6 +143,8 @@ public:
 private:
     Params p_;
     Calibration cal_[2];   // left, right
+    int capture_side_ = 0;
+    Calibration *capture_ = nullptr;
     V3 up_{0, 1, 0};
 };
 

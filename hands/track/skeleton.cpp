@@ -1,5 +1,8 @@
 #include "skeleton.h"
 
+#include <istream>
+#include <ostream>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -333,6 +336,28 @@ double Calibration::settled() const {
     int least = kSettle;
     for (int k = 0; k < kQuantities; ++k) least = std::min(least, n_[k]);
     return double(least) / kSettle;
+}
+
+bool Calibration::load(std::istream &in) {
+    Calibration saved;
+    for (int k = 0; k < kQuantities; ++k) {
+        double value = 0;
+        if (!(in >> value) || !std::isfinite(value) ||
+            (k < 15 ? std::abs(value) > 0.17 : value < 0.003 || value > 0.10)) return false;
+        saved.est_[k] = value;
+        saved.n_[k] = kSettle;
+    }
+    for (int k = 0; k < 15; k += 3) {
+        const double length = norm({saved.est_[k], saved.est_[k + 1], saved.est_[k + 2]});
+        if (length < 0.012 || length > 0.17) return false;
+    }
+    *this = saved;
+    return true;
+}
+
+void Calibration::save(std::ostream &out) const {
+    for (double value : est_) out << value << ' ';
+    out << '\n';
 }
 
 // ---------------------------------------------------------------------------- skeleton
@@ -674,14 +699,18 @@ void Skeleton::update(Fit &f, const V3 pts[21], bool right, double right_score, 
             const Rot Mt = M.t();
             for (int i = 0; i < 21; ++i) local[i] = mirror(Mt * (pts[i] - pts[0]), side);
             bool ok[5];
+            bool capture_open = capture_ && side == capture_side_;
             for (int c = 0; c < 5; ++c) {
                 const int b = kChainBase[c];
                 // bent fingers hide their own joints from the cameras: only fairly straight ones
                 const double bend = angle(local[b + 1] - local[b], local[b + 2] - local[b + 1]) +
                                     angle(local[b + 2] - local[b + 1], local[b + 3] - local[b + 2]);
                 ok[c] = bend < 90 * D;
+                capture_open = capture_open && bend < (c == 0 ? 90 : 55) * D;
             }
             cal_[side > 0].add(local, pt_ok, ok);
+            if (capture_open)
+                capture_->add(local, pt_ok, ok);
         }
     }
 

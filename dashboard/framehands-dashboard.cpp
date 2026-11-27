@@ -2,6 +2,8 @@
 // A separate oneshot systemd unit registers the app; this UI is never auto-started.
 // Closing the UI destroys the overlay but does NOT change hand-tracking settings.
 #include <openvr.h>
+#include "../config/hand_calibration.h"
+#include "../config/interaction_mode.h"
 #include "game_scene.h"
 #include <algorithm>
 #include <array>
@@ -25,6 +27,8 @@
 #include "assets/stb_truetype.h"
 
 namespace {
+using framehands::InteractionMode;
+using framehands::ReadInteractionMode;
 constexpr int W = 1280, H = 1580;
 struct RGB { uint8_t r, g, b; };
 struct Box {
@@ -33,9 +37,22 @@ struct Box {
 };
 constexpr Box kClose{1144, 56, 1224, 136};
 constexpr Box kTracking{56, 184, 1224, 376};
+constexpr Box kCalibration{886, 395, 1224, 449};
+constexpr Box kCalibrationStart{88, 660, 550, 740};
+constexpr Box kCalibrationReset{624, 660, 1192, 740};
 constexpr Box kVisuals{56, 460, 1224, 566};
-constexpr Box kTouch{56, 566, 1224, 672};
 constexpr Box kGamePause{56, 672, 1224, 778};
+struct InteractionOption {
+    InteractionMode mode;
+    const char *value;
+    const char *label;
+    Box box;
+};
+constexpr InteractionOption kInteractionOptions[] = {
+    {InteractionMode::Aim, "aim", "Aim & Pinch", {88, 616, 446, 661}},
+    {InteractionMode::Touch, "touch", "Direct Touch", {460, 616, 818, 661}},
+    {InteractionMode::Gaze, "gaze", "Gaze Assisted", {832, 616, 1192, 661}},
+};
 constexpr Box kSlider{88, 936, 1192, 990};
 constexpr Box kColour{80, 1102, 1200, 1182};
 constexpr Box kStable{780, 1306, 982, 1370};
@@ -207,16 +224,6 @@ bool Enabled() {
     }
     return track && autostart;
 }
-bool TouchEnabled() {
-    const char *home = std::getenv("HOME");
-    if (!home) return false;
-    std::ifstream f(std::filesystem::path(home) / ".config/framehands/config");
-    std::string line; bool enabled = false;
-    while (std::getline(f, line))
-        if (line == "HANDS_TOUCH=1") enabled = true;
-        else if (line == "HANDS_TOUCH=0") enabled = false;
-    return enabled;
-}
 bool VisualsEnabled() {
     const char *home = std::getenv("HOME");
     if (!home) return true;
@@ -272,9 +279,123 @@ std::string UpdateChannel() {
     }
     return channel;
 }
-void Paint(bool enabled, bool visuals, bool touch, bool gamePause, int smoothness, bool busy, bool failed) {
+
+struct CalibrationPanel {
+    bool open = false;
+    uint64_t token = 0;
+    std::string state = "ready";
+    int progress = 0;
+    std::filesystem::path request = hand_calibration::Runtime() / "hand-calibration-request";
+    std::filesystem::path status = hand_calibration::Runtime() / "hand-calibration-status";
+
+    bool HasProfile() const {
+        std::error_code error;
+        return std::filesystem::exists(hand_calibration::Profile(), error);
+    }
+
+    void End() {
+        if (token) unlink(request.c_str());
+        token = 0;
+    }
+
+    void Start(const char *command) {
+        progress = 0;
+        const auto now = hand_calibration::Now();
+        if (hand_calibration::Write(request, std::to_string(now) + " " + command + "\n")) {
+            token = now;
+            state = "waiting";
+        } else state = "error";
+    }
+
+    bool Refresh() {
+        if (!token) return false;
+        std::ifstream in(status);
+        uint64_t id = 0;
+        std::string next;
+        int percent = 0;
+        if (!(in >> id >> next >> percent) || id != token) next.clear();
+        const uint64_t elapsed = hand_calibration::Now() - token;
+        if (next.empty() && state == "waiting" && elapsed >= 8'000'000'000) next = "unavailable";
+        if ((next.empty() || next == "left" || next == "right") &&
+            elapsed >= hand_calibration::kTimeoutNs) next = "timeout";
+        if (next.empty() || (next == state && percent == progress)) return false;
+        state = next;
+        progress = std::clamp(percent, 0, 100);
+        if (state != "left" && state != "right") End();
+        return true;
+    }
+} calibration;
+
+void PaintCalibration(bool tracking) {
+    const RGB ink{241,245,245}, muted{171,185,189}, teal{113,215,197};
+    TextAt(56, 49, "Calibrate hands", 46, ink);
+    TextAt(56, 113, "Save a hand shape for each hand.", 24, muted);
+    RoundRect(kClose, 20, {39,49,55});
+    TextAt(1172, 65, "x", 48, ink);
+    RoundRect({56, 184, 1224, 790}, 24, {26,34,39});
+
+    const bool measuring = calibration.state == "left" || calibration.state == "right";
+    std::string title = "Fit the skeleton to your hands";
+    std::string first = "You will show one open hand at a time.";
+    std::string second = "Keep your fingers straight and comfortably spread.";
+    if (measuring) {
+        title = calibration.state == "left" ? "Open your left hand" : "Open your right hand";
+        first = "Hold it in front of you with your fingers spread.";
+        second = "Turn your wrist slightly, keeping your fingers straight.";
+    } else if (calibration.state == "waiting") {
+        title = "Waiting for hand tracking";
+        first = "Keep the dashboard open.";
+        second.clear();
+    } else if (calibration.state == "saved") {
+        title = "Hand calibration saved";
+        first = "Try pointing and pinching with each hand.";
+        second = "FrameHands will reuse this fit when tracking starts.";
+    } else if (calibration.state == "reset") {
+        title = "Automatic calibration restored";
+        first = "FrameHands will learn your hand shape as you use it.";
+        second.clear();
+    } else if (calibration.state == "timeout") {
+        title = "Calibration timed out";
+        first = "Try again with each hand clearly in front of you.";
+        second = "Turn tracking on first if it is paused.";
+    } else if (calibration.state == "unavailable") {
+        title = "The hand tracker did not respond";
+        first = "Check that hand tracking is running and try again.";
+        second.clear();
+    } else if (calibration.state == "error") {
+        title = "Could not finish calibration";
+        first = "Try again.";
+        second.clear();
+    }
+    if (!tracking && !calibration.token) {
+        first = "Turn on hand tracking before starting.";
+        second.clear();
+    }
+
+    TextAt(88, 243, title, 40, ink);
+    TextAt(88, 338, first, 27, muted);
+    TextAt(88, 385, second, 27, muted);
+    if (measuring) {
+        RoundRect({88, 509, 1040, 531}, 10, {71,86,93});
+        const int fill = 952 * calibration.progress / 100;
+        if (fill > 0) RoundRect({88, 509, 88 + fill, 531}, 10, teal);
+        TextAt(1080, 497, std::to_string(calibration.progress) + "%", 30, teal);
+    }
+    RoundRect(kCalibrationStart, 16, tracking || calibration.token ? RGB{44,73,69} : RGB{39,49,55});
+    TextAt(120, 683, calibration.token ? "Cancel" : "Start calibration", 29, ink);
+    if (!calibration.token && calibration.HasProfile()) {
+        RoundRect(kCalibrationReset, 16, {39,49,55});
+        TextAt(655, 683, "Restore automatic calibration", 28, ink);
+    }
+}
+
+void Paint(bool enabled, bool visuals, InteractionMode mode, bool gamePause, int smoothness, bool busy, bool failed) {
     const RGB ink{241,245,245}, muted{171,185,189}, teal{113,215,197};
     Rect(0, 0, W, H, {17,21,23});
+    if (calibration.open) {
+        PaintCalibration(enabled && !GamePaused());
+        return;
+    }
     TextAt(56, 49, "FrameHands", 46, ink);
     TextAt(56, 113, "Hand tracking for Steam Frame", 24, muted);
     RoundRect(kClose, 20, {39,49,55});
@@ -291,6 +412,8 @@ void Paint(bool enabled, bool visuals, bool touch, bool gamePause, int smoothnes
     Toggle(1044, 240, enabled);
 
     TextAt(56, 408, "Interaction", 26, muted);
+    RoundRect(kCalibration, 14, {39,49,55});
+    TextAt(923, 407, "Calibrate hands", 25, ink);
     RoundRect({56,460,1224,778}, 24, {52,65,71});
     RoundRect({58,462,1222,776}, 22, {26,34,39});
     Rect(88, 566, 1192, 567, {52,65,71});
@@ -298,9 +421,14 @@ void Paint(bool enabled, bool visuals, bool touch, bool gamePause, int smoothnes
     TextAt(88, 480, "Hand Visuals", 28, ink);
     TextAt(88, 524, "Show the hand overlay.", 22, muted);
     Toggle(1048, 473, visuals);
-    TextAt(88, 586, "Direct Touch", 28, ink);
-    TextAt(88, 630, "Interact with your fingertips.", 22, muted);
-    Toggle(1048, 579, touch);
+    TextAt(88, 576, "Interaction Mode", 28, ink);
+    if (mode == InteractionMode::Gaze)
+        TextAt(430, 581, "Turn your head and pinch to click.", 22, muted);
+    for (const auto &option : kInteractionOptions) {
+        const bool selected = mode == option.mode;
+        RoundRect(option.box, 12, selected ? RGB{49,78,74} : RGB{39,49,55});
+        TextAt(option.box.x0 + 20, option.box.y0 + 8, option.label, 24, selected ? teal : ink);
+    }
     TextAt(88, 692, "Pause During VR Games", 28, ink);
     TextAt(88, 736, "Pause tracking while a VR game is running.", 22, muted);
     Toggle(1048, 685, gamePause);
@@ -464,7 +592,8 @@ int main(int argc, char **argv) {
     vr::VROverlay()->SetOverlayRaw(thumb, thumbnail.data(), 64, 64, 4);
     std::signal(SIGPIPE, SIG_IGN); // a failed updater must not terminate the panel
 
-    bool enabled = Enabled(), visuals = VisualsEnabled(), touch = TouchEnabled();
+    bool enabled = Enabled(), visuals = VisualsEnabled();
+    InteractionMode mode = ReadInteractionMode();
     bool gamePause = GamePauseEnabled(), pausedState = GamePaused(), busy = false, failed = false;
     int smoothness = Smoothness();
     handColour = HandColour();
@@ -474,7 +603,7 @@ int main(int argc, char **argv) {
     pid_t child = -1;
     auto next = std::chrono::steady_clock::now();
     auto nextSliderDraw = next;
-    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+    Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
     // Opening FrameHands from + selects this panel immediately.
     vr::VROverlay()->ShowDashboard("framehands.dashboard");
@@ -530,7 +659,7 @@ int main(int argc, char **argv) {
             volatile char *wipe = password;
             for (size_t i = 0; i < sizeof password; ++i) wipe[i] = 0;
         } else return;
-        Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+        Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
         vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
     };
     while (running) {
@@ -558,7 +687,7 @@ int main(int argc, char **argv) {
                     smoothness = value;
                     if (std::chrono::steady_clock::now() >= nextSliderDraw) {
                         nextSliderDraw = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
-                        Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                        Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                         vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     }
                 }
@@ -573,12 +702,24 @@ int main(int argc, char **argv) {
                     _exit(127);
                 }
                 busy = child > 0; failed = child < 0;
-                Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
             if (event.eventType == vr::VREvent_MouseButtonDown && !busy) {
                 const float x = event.data.mouse.x;
                 const float y = H - event.data.mouse.y; // GL mouse coordinates are bottom-left.
+                if (calibration.open || kCalibration.Contains(x, y)) {
+                    if (!calibration.open) calibration.open = true, calibration.state = "ready";
+                    else if (kClose.Contains(x, y)) calibration.End(), calibration.open = false;
+                    else if (kCalibrationStart.Contains(x, y)) {
+                        if (calibration.token) calibration.End(), calibration.state = "ready";
+                        else if (enabled && !GamePaused()) calibration.Start("capture");
+                    } else if (kCalibrationReset.Contains(x, y) && !calibration.token &&
+                               enabled && !GamePaused() && calibration.HasProfile()) calibration.Start("reset");
+                    Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
+                    vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+                    continue;
+                }
                 if (kClose.Contains(x, y)) {
                     running = false;
                     break;
@@ -593,7 +734,7 @@ int main(int argc, char **argv) {
                             _exit(127);
                         }
                         busy = child > 0; failed = child < 0;
-                        Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                        Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                         vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     }
                     continue;
@@ -609,7 +750,7 @@ int main(int argc, char **argv) {
                         }
                         busy = child > 0; failed = child < 0;
                         if (busy) { updateChannel = target; updateStatus = "CHECK FOR UPDATES"; }
-                        Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                        Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                         vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     }
                     continue;
@@ -625,7 +766,7 @@ int main(int argc, char **argv) {
                             "STEAMOS PASSWORD FOR FRAMEHANDS UPDATE", 127, "", 0);
                         awaitingPassword = shown == vr::VROverlayError_None;
                         updateStatus = awaitingPassword ? "ENTER STEAMOS PASSWORD" : "KEYBOARD UNAVAILABLE";
-                        Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                        Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                         vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                         continue;
                     }
@@ -638,7 +779,7 @@ int main(int argc, char **argv) {
                     }
                     updateChild = child > 0;
                     busy = child > 0; failed = child < 0;
-                    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                    Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     continue;
                 }
@@ -647,7 +788,7 @@ int main(int argc, char **argv) {
                     sliding = true;
                     smoothness = SmoothnessAt(x);
                     nextSliderDraw = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
-                    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                    Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     continue;
                 }
@@ -660,20 +801,21 @@ int main(int argc, char **argv) {
                         _exit(127);
                     }
                     busy = child > 0; failed = child < 0;
-                    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                    Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     continue;
                 }
-                if (kTouch.Contains(x, y)) {
-                    const bool toEnable = !touch;
+                const auto interaction = std::find_if(std::begin(kInteractionOptions), std::end(kInteractionOptions),
+                    [x, y](const InteractionOption &option) { return option.box.Contains(x, y); });
+                if (interaction != std::end(kInteractionOptions)) {
                     child = fork();
                     if (child == 0) {
                         const std::string cli = Cli().string();
-                        execl(cli.c_str(), cli.c_str(), toEnable ? "touch-on" : "touch-off", (char *)nullptr);
+                        execl(cli.c_str(), cli.c_str(), "interaction-mode", interaction->value, (char *)nullptr);
                         _exit(127);
                     }
                     busy = child > 0; failed = child < 0;
-                    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                    Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     continue;
                 }
@@ -685,7 +827,7 @@ int main(int argc, char **argv) {
                         _exit(127);
                     }
                     busy = child > 0; failed = child < 0;
-                    Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                    Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                     vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
                     continue;
                 }
@@ -699,7 +841,7 @@ int main(int argc, char **argv) {
                 }
                 busy = child > 0;
                 failed = child < 0;
-                Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
         }
@@ -725,36 +867,39 @@ int main(int argc, char **argv) {
                 }
                 enabled = Enabled();
                 visuals = VisualsEnabled();
-                touch = TouchEnabled();
+                mode = ReadInteractionMode();
                 gamePause = GamePauseEnabled();
                 pausedState = GamePaused();
                 smoothness = Smoothness();
                 handColour = HandColour();
                 updateChannel = UpdateChannel();
-                Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
         }
         if (std::chrono::steady_clock::now() >= next && !busy) {
             next = std::chrono::steady_clock::now() + std::chrono::milliseconds(800);
-            const bool current = Enabled(), currentVisuals = VisualsEnabled(), currentTouch = TouchEnabled();
+            const bool current = Enabled(), currentVisuals = VisualsEnabled();
+            const auto currentMode = ReadInteractionMode();
             const bool currentGamePause = GamePauseEnabled(), currentPaused = GamePaused();
             const int currentSmooth = Smoothness();
             const std::string currentColour = HandColour();
             const std::string currentChannel = UpdateChannel();
-            if (!sliding && (current != enabled || currentVisuals != visuals || currentTouch != touch ||
+            const bool calibrationChanged = calibration.open && calibration.Refresh();
+            if (!sliding && (calibrationChanged || current != enabled || currentVisuals != visuals || currentMode != mode ||
                              currentGamePause != gamePause || currentPaused != pausedState || currentSmooth != smoothness ||
                              currentColour != handColour || currentChannel != updateChannel)) {
-                enabled = current; visuals = currentVisuals; touch = currentTouch;
+                enabled = current; visuals = currentVisuals; mode = currentMode;
                 gamePause = currentGamePause; pausedState = currentPaused; smoothness = currentSmooth;
                 handColour = currentColour;
                 updateChannel = currentChannel;
-                Paint(enabled, visuals, touch, gamePause, smoothness, busy, failed);
+                Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
                 vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    calibration.End();
     vr::VROverlay()->DestroyOverlay(mainOverlay);
     vr::VROverlay()->DestroyOverlay(thumb);
     vr::VR_Shutdown();

@@ -18,6 +18,7 @@ DASHBOARD_UNIT = "framehands-dashboard.service"
 WATCHDOG_UNIT = "framehands-watchdog.service"
 GAME_MONITOR_UNIT = "framehands-game-monitor.service"
 GAME_PAUSE = RUN / "game-paused"
+INTERACTION_MODES = ("aim", "touch", "gaze")
 
 
 def config():
@@ -59,8 +60,10 @@ def selected():
     cfg = config()
     if cfg.get("TRACKING", "1") == "0":
         return ()
+    input_enabled = (cfg.get("HANDS_INTERACTION_MODE") in INTERACTION_MODES or
+                     cfg.get("GESTURE_INPUT", "0") == "1" or cfg.get("HANDS_TOUCH", "0") == "1")
     return (UNITS[:2] + ((UNITS[2],) if cfg.get("RENDER", "1") != "0" else ()) +
-            ((UNITS[3],) if cfg.get("GESTURE_INPUT", "0") == "1" or cfg.get("HANDS_TOUCH", "0") == "1" else ()))
+            ((UNITS[3],) if input_enabled else ()))
 
 
 def tracker_args():
@@ -223,8 +226,8 @@ def watchdog():
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="framehands")
     parser.add_argument("command", choices=("start", "stop", "restart", "status", "enable", "disable",
-                                            "gestures", "logs", "doctor", "sync", "run-tracker", "run-camd", "run-view", "run-input", "run-dashboard", "register-dashboard", "touch-on", "touch-off", "visuals-on", "visuals-off", "smoothness", "colour", "update-channel", "run-watchdog", "run-game-monitor", "games-on", "games-off", "game-pause", "game-resume"))
-    parser.add_argument("value", nargs="?", help="smoothness 0..100 or colour preset")
+                                            "gestures", "logs", "doctor", "sync", "run-tracker", "run-camd", "run-view", "run-input", "run-dashboard", "register-dashboard", "interaction-mode", "touch-on", "touch-off", "visuals-on", "visuals-off", "smoothness", "colour", "update-channel", "run-watchdog", "run-game-monitor", "games-on", "games-off", "game-pause", "game-resume"))
+    parser.add_argument("value", nargs="?", help="value for interaction-mode, smoothness, colour, or update-channel")
     args = parser.parse_args(argv)
     cmd = args.command
     try:
@@ -273,16 +276,26 @@ def main(argv=None):
                 if config().get("AUTO_START", "1") != "0" and active("steamvr.service") and selected():
                     ctl("start", *selected(), check=True)
             print("Pause during games:", "on" if on else "off")
-        elif cmd in ("touch-on", "touch-off"):
-            set_config("HANDS_TOUCH", "1" if cmd == "touch-on" else "0")
-            # Direct touch runs in fh-input. Enable/start it when this option is
-            # selected, and release it when neither touch nor gestures needs it.
+        elif cmd in ("interaction-mode", "touch-on", "touch-off"):
+            if cmd == "interaction-mode":
+                if args.value not in INTERACTION_MODES:
+                    raise RuntimeError("usage: framehands interaction-mode aim|touch|gaze")
+                set_config("HANDS_INTERACTION_MODE", args.value)
+            else:
+                touch_on = cmd == "touch-on"
+                if config().get("HANDS_INTERACTION_MODE") in INTERACTION_MODES:
+                    set_config("HANDS_INTERACTION_MODE", "touch" if touch_on else "aim")
+                else:
+                    set_config("HANDS_TOUCH", "1" if touch_on else "0")
             sync_enabled()
             if UNITS[3] not in selected():
                 ctl("stop", UNITS[3], check=True)
             elif config().get("AUTO_START", "1") != "0" and active("steamvr.service") and not GAME_PAUSE.exists():
                 ctl("start", UNITS[3], check=True)
-            print("Direct touch:", "on" if cmd == "touch-on" else "off")
+            if cmd == "interaction-mode":
+                print("Interaction mode:", args.value)
+            else:
+                print("Direct touch:", "on" if touch_on else "off")
         elif cmd in ("visuals-on", "visuals-off"):
             on = cmd == "visuals-on"
             set_config("RENDER", "1" if on else "0")

@@ -97,6 +97,32 @@ class ControlTests(unittest.TestCase):
             self.assertIn(("start", cli.UNITS[3]), commands)
             self.assertNotIn(("stop", cli.UNITS[3]), commands)
 
+    def test_interaction_mode_enables_input_and_preserves_game_pause(self):
+        commands = []
+        def fake_ctl(*args, **_kwargs):
+            commands.append(args)
+            return SimpleNamespace(returncode=0, stderr="")
+        with tempfile.TemporaryDirectory() as tmp, patch.object(cli, "CONFIG", Path(tmp)/"config"), \
+             patch.object(cli, "GAME_PAUSE", Path(tmp)/"game-paused"), \
+             patch.object(cli, "ctl", side_effect=fake_ctl), patch.object(cli, "active", return_value=True):
+            cli.CONFIG.write_text("TRACKING=1\nGESTURE_INPUT=0\nHANDS_TOUCH=1\n")
+            for mode in ("aim", "touch", "gaze"):
+                commands.clear()
+                self.assertEqual(cli.main(["interaction-mode", mode]), 0)
+                self.assertEqual(cli.config()["HANDS_INTERACTION_MODE"], mode)
+                self.assertIn(cli.UNITS[3], cli.selected())
+                self.assertIn(("start", cli.UNITS[3]), commands)
+                self.assertFalse(any(command[0] in ("restart", "stop") for command in commands))
+            self.assertEqual(cli.main(["interaction-mode", "unknown"]), 1)
+            self.assertEqual(cli.config()["HANDS_INTERACTION_MODE"], "gaze")
+            self.assertEqual(cli.main(["touch-off"]), 0)
+            self.assertEqual(cli.config()["HANDS_INTERACTION_MODE"], "aim")
+
+            cli.GAME_PAUSE.touch()
+            commands.clear()
+            self.assertEqual(cli.main(["interaction-mode", "gaze"]), 0)
+            self.assertFalse(any(command[0] == "start" for command in commands))
+
     def test_visuals_toggle_only_starts_and_stops_the_view(self):
         commands = []
         def fake_ctl(*args, **_kwargs):
