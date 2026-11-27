@@ -10,6 +10,24 @@ inline std::optional<AimRay> HeadGazeRay(V head, V forward) {
     return AimRay{head, forward * (1.0 / length)};
 }
 
+inline std::optional<double> GazeCursorDepth(AimRay ray, V cursor) {
+    const V delta = cursor - ray.origin;
+    const double depth = Dot(delta, ray.direction);
+    // The compositor's cursor can be from a preceding frame. Use it only
+    // when it is still on this sightline and in front of the headset.
+    if (!std::isfinite(depth) || depth <= 0 || Length(delta - ray.direction * depth) > 0.006)
+        return std::nullopt;
+    return depth;
+}
+
+inline AimRay GazeScreenRay(AimRay ray, std::optional<double> surfaceDepth) {
+    if (!surfaceDepth || !std::isfinite(*surfaceDepth)) return ray;
+    // Start just in front of the surface so SteamVR can still intersect it.
+    constexpr double kSurfaceClearance = 0.025;
+    ray.origin = ray.origin + ray.direction * std::max(0.0, *surfaceDepth - kSurfaceClearance);
+    return ray;
+}
+
 struct GazeHand {
     uint32_t begins = 0;
     uint32_t id = 0;

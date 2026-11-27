@@ -123,6 +123,28 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(cli.main(["interaction-mode", "gaze"]), 0)
             self.assertFalse(any(command[0] == "start" for command in commands))
 
+    def test_two_fist_menu_setting_and_service(self):
+        commands = []
+        def fake_ctl(*args, **_kwargs):
+            commands.append(args)
+            return SimpleNamespace(returncode=0, stderr="")
+        with tempfile.TemporaryDirectory() as tmp, patch.object(cli, "CONFIG", Path(tmp)/"config"), \
+             patch.object(cli, "GAME_PAUSE", Path(tmp)/"game-paused"), \
+             patch.object(cli, "ctl", side_effect=fake_ctl), patch.object(cli, "active", return_value=True):
+            self.assertNotIn(cli.UNITS[3], cli.selected())
+            self.assertEqual(cli.main(["two-fist-menu", "on"]), 0)
+            self.assertEqual(cli.config()["HANDS_TWO_FIST_MENU"], "1")
+            self.assertIn(("start", cli.UNITS[3]), commands)
+            self.assertEqual(cli.main(["two-fist-menu", "off"]), 0)
+            self.assertNotIn(cli.UNITS[3], cli.selected())
+            self.assertIn(("stop", cli.UNITS[3]), commands)
+            self.assertEqual(cli.main(["two-fist-menu", "invalid"]), 1)
+            self.assertEqual(cli.config()["HANDS_TWO_FIST_MENU"], "0")
+            commands.clear()
+            cli.GAME_PAUSE.touch()
+            self.assertEqual(cli.main(["two-fist-menu", "on"]), 0)
+            self.assertFalse(any(c[0] == "start" for c in commands))
+
     def test_visuals_toggle_only_starts_and_stops_the_view(self):
         commands = []
         def fake_ctl(*args, **_kwargs):

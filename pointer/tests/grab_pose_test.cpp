@@ -1,4 +1,5 @@
 #include "../helper/gaze_pointer.h"
+#include "../helper/gesture_rules.h"
 
 #include <cassert>
 #include <iostream>
@@ -220,6 +221,16 @@ static void CheckGaze() {
     const auto moved = HeadGazeRay({0.02, 1.6, 0}, {0.4, 0, -0.8}).value();
     assert(!HeadGazeRay({}, {}));
     assert(Length(Rotate(AimRotation(moved.direction), {0, 0, -1}) - moved.direction) < 1e-8);
+    const V hit = moved.origin + moved.direction * 0.9;
+    const auto depth = GazeCursorDepth(moved, hit);
+    assert(depth && std::abs(*depth - 0.9) < 1e-8);
+    assert(!GazeCursorDepth(moved, hit + V{0, 0.01, 0}));
+    assert(!GazeCursorDepth(moved, moved.origin - moved.direction * 0.9));
+    const auto shortened = GazeScreenRay(moved, depth);
+    // Moving the beam origin leaves the hit position and direction intact.
+    assert(Length(shortened.origin + shortened.direction * 0.025 - hit) < 1e-8);
+    assert(Length(GazeScreenRay(moved, std::nullopt).origin - moved.origin) == 0);
+    assert(Length(GazeScreenRay(moved, 0.015).origin - moved.origin) == 0);
     GazeClick gaze;
     GazeHand hands[2]{};
     int64_t now = 1'000'000'000;
@@ -259,6 +270,44 @@ static void CheckGaze() {
     assert(gaze.Step(first, hands, true, now + 60'000'000).button == GazeButton::Up);
 }
 
+static void CheckTwoFistMenu() {
+    TwoFistMenuGesture menu;
+    constexpr int64_t base = 1'000'000'000;
+    const auto step = [&](int ms, bool left, bool right, uint32_t rightId = 2) {
+        const int64_t capture = base + ms * 1'000'000ll;
+        return menu.Step(capture, capture, 1, rightId, left, right, true);
+    };
+    // Fists already closed at startup, a single fist, and a quick squeeze
+    // cannot toggle the menu.
+    assert(!step(0, true, true));
+    assert(!step(80, false, false));
+    assert(!step(160, true, false));
+    assert(!step(220, true, true));
+    assert(!step(290, false, false));
+    assert(!step(350, true, true));
+    assert(!menu.Step(base + 350'000'000, base + 750'000'000, 1, 2, true, true, true));
+    assert(!step(760, true, true));
+    assert(!step(860, true, true));
+    assert(!step(960, true, true));
+    assert(step(1060, true, true));
+    assert(!step(1160, true, true));
+    assert(!step(1260, false, true));
+    assert(!step(1360, true, true));
+    assert(!step(1460, true, true));
+    assert(!step(1560, true, true));
+    assert(!step(1660, true, true));
+
+    // Releasing both hands enables the next toggle. Reassigning a hand
+    // partway through the hold restarts the timer.
+    assert(!step(1760, false, false));
+    assert(!step(1860, true, true));
+    assert(!step(1960, true, true));
+    assert(!step(2060, true, true, 3));
+    assert(!step(2160, true, true, 3));
+    assert(!step(2260, true, true, 3));
+    assert(step(2360, true, true, 3));
+}
+
 int main() {
     CheckAim();
     CheckGrabJitter(3);  // 30 Hz cameras
@@ -266,5 +315,6 @@ int main() {
     CheckGrab();
     CheckGrabReacquisition();
     CheckGaze();
-    std::cout << "Pointer aim, window grabs, gaze hover, and pinch click checks passed\n";
+    CheckTwoFistMenu();
+    std::cout << "Pointer aim, window grabs, gaze, and two-fist menu checks passed\n";
 }

@@ -16,6 +16,7 @@ https://github.com/user-attachments/assets/5018c196-aec9-4d24-bae9-d963316f9b3a
 - Adds wrist rotation to pinch drags so SteamVR can tilt a floating window from its grab handle.
 - Provides a FrameHands dashboard panel to control tracking, hand visuals, touch, and updates.
 - Saves a personal hand shape through **Calibrate hands** in the dashboard.
+- Offers an optional two-fist gesture to open or close the SteamVR menu.
 - Can pause tracking while a local VR game is active. Detection of PC-streamed games is not yet reliable.
 
 FrameHands does not yet provide native hand controls or skeletal input to VR games such as *Half-Life: Alyx*.

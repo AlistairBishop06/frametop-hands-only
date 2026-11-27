@@ -29,6 +29,7 @@
 namespace {
 using framehands::InteractionMode;
 using framehands::ReadInteractionMode;
+using framehands::TwoFistMenuEnabled;
 constexpr int W = 1280, H = 1580;
 struct RGB { uint8_t r, g, b; };
 struct Box {
@@ -38,6 +39,8 @@ struct Box {
 constexpr Box kClose{1144, 56, 1224, 136};
 constexpr Box kTracking{56, 184, 1224, 376};
 constexpr Box kCalibration{886, 395, 1224, 449};
+constexpr Box kGestures{662, 395, 870, 449};
+constexpr Box kTwoFistMenu{56, 190, 1224, 355};
 constexpr Box kCalibrationStart{88, 660, 550, 740};
 constexpr Box kCalibrationReset{624, 660, 1192, 740};
 constexpr Box kVisuals{56, 460, 1224, 566};
@@ -326,6 +329,20 @@ struct CalibrationPanel {
     }
 } calibration;
 
+bool gesturesOpen = false, twoFistMenu = false;
+
+void PaintGestures() {
+    const RGB ink{241,245,245}, muted{171,185,189};
+    TextAt(56, 49, "Gestures", 46, ink);
+    RoundRect(kClose, 20, {39,49,55});
+    TextAt(1172, 65, "x", 48, ink);
+    RoundRect(kTwoFistMenu, 24, {26,34,39});
+    TextAt(88, 218, "Two-fist SteamVR menu", 32, ink);
+    TextAt(88, 268, "Make a fist with both hands and hold briefly to open or close the menu.", 24, muted);
+    TextAt(88, 310, "Open both hands before repeating.", 22, muted);
+    Toggle(1048, 213, twoFistMenu);
+}
+
 void PaintCalibration(bool tracking) {
     const RGB ink{241,245,245}, muted{171,185,189}, teal{113,215,197};
     TextAt(56, 49, "Calibrate hands", 46, ink);
@@ -396,6 +413,10 @@ void Paint(bool enabled, bool visuals, InteractionMode mode, bool gamePause, int
         PaintCalibration(enabled && !GamePaused());
         return;
     }
+    if (gesturesOpen) {
+        PaintGestures();
+        return;
+    }
     TextAt(56, 49, "FrameHands", 46, ink);
     TextAt(56, 113, "Hand tracking for Steam Frame", 24, muted);
     RoundRect(kClose, 20, {39,49,55});
@@ -412,6 +433,8 @@ void Paint(bool enabled, bool visuals, InteractionMode mode, bool gamePause, int
     Toggle(1044, 240, enabled);
 
     TextAt(56, 408, "Interaction", 26, muted);
+    RoundRect(kGestures, 14, {39,49,55});
+    TextAt(711, 407, "Gestures", 25, ink);
     RoundRect(kCalibration, 14, {39,49,55});
     TextAt(923, 407, "Calibrate hands", 25, ink);
     RoundRect({56,460,1224,778}, 24, {52,65,71});
@@ -594,6 +617,7 @@ int main(int argc, char **argv) {
 
     bool enabled = Enabled(), visuals = VisualsEnabled();
     InteractionMode mode = ReadInteractionMode();
+    twoFistMenu = TwoFistMenuEnabled();
     bool gamePause = GamePauseEnabled(), pausedState = GamePaused(), busy = false, failed = false;
     int smoothness = Smoothness();
     handColour = HandColour();
@@ -708,6 +732,23 @@ int main(int argc, char **argv) {
             if (event.eventType == vr::VREvent_MouseButtonDown && !busy) {
                 const float x = event.data.mouse.x;
                 const float y = H - event.data.mouse.y; // GL mouse coordinates are bottom-left.
+                if (gesturesOpen || (!calibration.open && kGestures.Contains(x, y))) {
+                    if (!gesturesOpen) gesturesOpen = true;
+                    else if (kClose.Contains(x, y)) gesturesOpen = false;
+                    else if (kTwoFistMenu.Contains(x, y)) {
+                        child = fork();
+                        if (child == 0) {
+                            const std::string cli = Cli().string();
+                            execl(cli.c_str(), cli.c_str(), "two-fist-menu", twoFistMenu ? "off" : "on", (char *)nullptr);
+                            _exit(127);
+                        }
+                        busy = child > 0;
+                        failed = child < 0;
+                    }
+                    Paint(enabled, visuals, mode, gamePause, smoothness, busy, failed);
+                    vr::VROverlay()->SetOverlayRaw(mainOverlay, pixels.data(), W, H, 4);
+                    continue;
+                }
                 if (calibration.open || kCalibration.Contains(x, y)) {
                     if (!calibration.open) calibration.open = true, calibration.state = "ready";
                     else if (kClose.Contains(x, y)) calibration.End(), calibration.open = false;
@@ -868,6 +909,7 @@ int main(int argc, char **argv) {
                 enabled = Enabled();
                 visuals = VisualsEnabled();
                 mode = ReadInteractionMode();
+                twoFistMenu = TwoFistMenuEnabled();
                 gamePause = GamePauseEnabled();
                 pausedState = GamePaused();
                 smoothness = Smoothness();
@@ -881,15 +923,18 @@ int main(int argc, char **argv) {
             next = std::chrono::steady_clock::now() + std::chrono::milliseconds(800);
             const bool current = Enabled(), currentVisuals = VisualsEnabled();
             const auto currentMode = ReadInteractionMode();
+            const bool currentTwoFistMenu = TwoFistMenuEnabled();
             const bool currentGamePause = GamePauseEnabled(), currentPaused = GamePaused();
             const int currentSmooth = Smoothness();
             const std::string currentColour = HandColour();
             const std::string currentChannel = UpdateChannel();
             const bool calibrationChanged = calibration.open && calibration.Refresh();
             if (!sliding && (calibrationChanged || current != enabled || currentVisuals != visuals || currentMode != mode ||
+                             currentTwoFistMenu != twoFistMenu ||
                              currentGamePause != gamePause || currentPaused != pausedState || currentSmooth != smoothness ||
                              currentColour != handColour || currentChannel != updateChannel)) {
                 enabled = current; visuals = currentVisuals; mode = currentMode;
+                twoFistMenu = currentTwoFistMenu;
                 gamePause = currentGamePause; pausedState = currentPaused; smoothness = currentSmooth;
                 handColour = currentColour;
                 updateChannel = currentChannel;
