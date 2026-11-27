@@ -184,6 +184,11 @@ bool FloatingGazeAllowed() {
 
 class GazeSurfaces {
 public:
+    struct Range {
+        std::optional<double> surface;
+        double searchDistance = pointer_pose::kGazeSearchDistance;
+    };
+
     void Refresh(const std::vector<std::string> &keys, const std::vector<vr::VROverlayHandle_t> &observed) {
         panels_.clear();
         auto *overlays = vr::VROverlay();
@@ -209,8 +214,8 @@ public:
         overlays->FindOverlay("system.pointer", &cursor_);
     }
 
-    std::optional<double> Depth(AimRay ray, const vr::HmdMatrix34_t &rawHead,
-                                vr::TrackedDeviceIndex_t pointer) const {
+    Range Depth(AimRay ray, const vr::HmdMatrix34_t &rawHead,
+                vr::TrackedDeviceIndex_t pointer) const {
         auto *overlays = vr::VROverlay();
         auto *compositor = vr::VRCompositor();
         const auto raw = vr::TrackingUniverseRawAndUncalibrated;
@@ -239,7 +244,7 @@ public:
                 nearestPanel = panel;
             }
         }
-        if (nearest && overlays->IsHoverTargetOverlay(nearestPanel)) return nearest;
+        if (nearest && overlays->IsHoverTargetOverlay(nearestPanel)) return {nearest};
         // Scene-graph panels can expose only the compositor's native dot.
         // Avoid a cursor from a physical controller, or one at an old aim.
         if (pointer != vr::k_unTrackedDeviceIndexInvalid && overlays->GetPrimaryDashboardDevice() == pointer &&
@@ -248,20 +253,34 @@ public:
             vr::HmdMatrix34_t transform{};
             if (overlays->GetOverlayTransformAbsolute(cursor_, &cursorSpace, &transform) == vr::VROverlayError_None) {
                 V cursor = Position(transform);
+                bool valid = true;
                 if (cursorSpace != raw) {
                     if (cursorSpace != query.eOrigin)
                         vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(cursorSpace, 0, &spaceHead, 1);
-                    if (!spaceHead.bPoseIsValid) return std::nullopt;
-                    const auto &head = spaceHead.mDeviceToAbsoluteTracking;
-                    cursor = Local(rawHead, Unrotate(head, cursor - Position(head)));
+                    valid = spaceHead.bPoseIsValid;
+                    if (valid) {
+                        const auto &head = spaceHead.mDeviceToAbsoluteTracking;
+                        cursor = Local(rawHead, Unrotate(head, cursor - Position(head)));
+                    }
                 }
-                const auto depth = GazeCursorDepth(ray, cursor);
-                if (depth && (!nearest || *depth <= *nearest + 0.006)) return depth;
+                const auto depth = valid ? GazeCursorDepth(ray, cursor) : std::nullopt;
+                if (depth && (!nearest || *depth <= *nearest + 0.006)) return {depth};
             }
         }
-        // Keep the full hit test when SteamVR hasn't confirmed this surface.
-        // Starting at a guessed distance could skip a closer target.
-        return std::nullopt;
+        // The rearward search still intersects targets in front of the head.
+        // Stop short of any known panels behind the head so they can't take
+        // hover or receive a click meant for a screen in front.
+        Range result;
+        const V search = queryRay.origin - queryRay.direction * result.searchDistance;
+        query.vSource = {{float(search.x), float(search.y), float(search.z)}};
+        for (const auto panel : panels_) {
+            vr::VROverlayIntersectionResults_t hit{};
+            if (!overlays->ComputeOverlayIntersection(panel, &query, &hit)) continue;
+            const double clearance = pointer_pose::GazeRearClearance(hit.fDistance);
+            if (clearance < result.searchDistance && overlays->IsOverlayVisible(panel))
+                result.searchDistance = clearance;
+        }
+        return result;
     }
 
 private:
@@ -414,6 +433,7 @@ int main() {
     };
     auto stopGaze = [&] {
         if (gazeClick.Pressed()) Send(fd, "btn trigger 0");
+        if (mode == InteractionMode::Gaze) releaseGrabLock();
         gazeClick.Reset();
         if (showing) Send(fd, "hide");
         showing = false;
@@ -598,19 +618,22 @@ int main() {
                 pinch[s] = {g.begins, g.handId, g.captureNs, eligible, g.down};
             }
             const bool ready = showing && !claimAt && claimedAt && now - claimedAt >= 60'000'000ll;
-            const auto cursor = gazeClick.Step(*live, pinch, ready, now);
+            const bool lockReady = grabLockAt && now - grabLockAt >= kGrabLockLeadNs;
+            const auto cursor = gazeClick.Step(*live, pinch, ready, now, !dashboard, lockReady);
             if (now >= nextGazeSurfaces) {
                 gazeSurfaces.Refresh(overlayKeys, observedOverlays);
                 nextGazeSurfaces = now + 150'000'000ll;
             }
             const auto depth = gazeSurfaces.Depth(cursor.ray, hmd.mDeviceToAbsoluteTracking, physical.pointer);
-            const auto onScreen = GazeScreenRay(cursor.ray, depth);
+            const auto onScreen = GazeScreenRay(cursor.ray, depth.surface, depth.searchDistance);
             const auto rotation = AimRotation(cursor.ray.direction);
-            SendPoses(fd, {onScreen.origin, rotation}, {cursor.ray.origin, rotation});
+            SendPoses(fd, {onScreen.origin, rotation}, {cursor.deviceRay.origin, AimRotation(cursor.deviceRay.direction)});
             showPointer(physical.freeSide, now);
             claimPointer(now);
+            if (cursor.lockMouse && !grabLockAt && Send(fd, "btn grab_lock 1")) grabLockAt = now;
             if (cursor.button == GazeButton::Down) Send(fd, "btn trigger 1");
             else if (cursor.button == GazeButton::Up) Send(fd, "btn trigger 0");
+            if (!cursor.lockMouse) releaseGrabLock();
             continue;
         }
         bool ready[2]{};

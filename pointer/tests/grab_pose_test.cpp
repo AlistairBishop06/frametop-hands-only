@@ -229,7 +229,16 @@ static void CheckGaze() {
     const auto shortened = GazeScreenRay(moved, depth);
     // Moving the beam origin leaves the hit position and direction intact.
     assert(Length(shortened.origin + shortened.direction * 0.025 - hit) < 1e-8);
-    assert(Length(GazeScreenRay(moved, std::nullopt).origin - moved.origin) == 0);
+    const auto offScreen = GazeScreenRay(moved, std::nullopt);
+    assert(Length(offScreen.origin + offScreen.direction * kGazeSearchDistance - moved.origin) < 1e-8);
+    assert(Length(offScreen.origin + offScreen.direction * (kGazeSearchDistance + 0.9) - hit) < 1e-8);
+    // A panel behind the head limits the search. Panels in front of it
+    // still see the original gaze line.
+    const double rear = GazeRearClearance(1.7);
+    assert(std::abs(rear - 0.275) < 1e-8);
+    assert(GazeRearClearance(2.4) == kGazeSearchDistance);
+    const auto limited = GazeScreenRay(moved, std::nullopt, rear);
+    assert(Length(limited.origin + limited.direction * (rear + 0.9) - hit) < 1e-8);
     assert(Length(GazeScreenRay(moved, 0.015).origin - moved.origin) == 0);
     GazeClick gaze;
     GazeHand hands[2]{};
@@ -267,7 +276,57 @@ static void CheckGaze() {
     hands[0] = {10, 10, now, true, true};
     assert(gaze.Step(moved, hands, true, now).button == GazeButton::Down);
     hands[0].eligible = false;
+    hands[0].pinching = false;
     assert(gaze.Step(first, hands, true, now + 60'000'000).button == GazeButton::Up);
+}
+
+static void CheckGazeDrag(bool outsideDashboard) {
+    const AimRay start{{0, 1.6, 0}, {0, 0, -1}};
+    const AimRay turned = HeadGazeRay({0.10, 1.6, 0}, {0.3, 0, -1}).value();
+    const AimRay afterRelease = HeadGazeRay({-0.10, 1.6, 0}, {-0.3, 0, -1}).value();
+    GazeClick gaze;
+    GazeHand hands[2]{};
+    constexpr int64_t base = 1'000'000'000;
+    const auto step = [&](int ms, AimRay ray, bool lockReady = true) {
+        const int64_t now = base + ms * 1'000'000ll;
+        hands[0].captureNs = now;
+        return gaze.Step(ray, hands, true, now, outsideDashboard, lockReady);
+    };
+    assert(step(0, start).button == GazeButton::None);
+    hands[0] = {1, 5, 0, true, true};
+    if (outsideDashboard) {
+        const auto waiting = step(10, start, false);
+        assert(waiting.lockMouse && waiting.button == GazeButton::None);
+    }
+    const auto down = step(45, start);
+    assert(down.button == GazeButton::Down && down.lockMouse == outsideDashboard);
+    assert(!AimMoved(start, step(75, turned).deviceRay));
+    assert(!AimMoved(start, step(105, turned).deviceRay));
+
+    // Looking away from the hand during a grab must not release it.
+    hands[0].eligible = false;
+    const auto moving = step(135, turned);
+    assert(moving.button == GazeButton::None && AimMoved(start, moving.deviceRay));
+    assert(AimMoved(moving.deviceRay, turned));
+    const auto placed = step(175, turned);
+    assert(!AimMoved(turned, placed.deviceRay));
+    hands[0].pinching = false;
+    const auto up = step(195, afterRelease);
+    assert(up.button == GazeButton::Up && up.lockMouse == outsideDashboard);
+    assert(!AimMoved(placed.deviceRay, up.deviceRay));
+    // The laser can resume aiming while SteamVR reads the last drag pose.
+    const auto settled = step(345, afterRelease);
+    assert(!settled.lockMouse && !AimMoved(afterRelease, settled.ray));
+    assert(!AimMoved(placed.deviceRay, settled.deviceRay));
+
+    // A new pinch during the final pose hold is queued. Its aim cannot
+    // overwrite the raw pose SteamVR is still using to place the window.
+    hands[0] = {2, 5, 0, true, true};
+    const auto queued = step(365, afterRelease);
+    assert(queued.button == GazeButton::None && !AimMoved(placed.deviceRay, queued.deviceRay));
+    assert(step(455, afterRelease, false).button ==
+           (outsideDashboard ? GazeButton::None : GazeButton::Down));
+    if (outsideDashboard) assert(step(490, afterRelease).button == GazeButton::Down);
 }
 
 static void CheckTwoFistMenu() {
@@ -315,6 +374,8 @@ int main() {
     CheckGrab();
     CheckGrabReacquisition();
     CheckGaze();
+    CheckGazeDrag(false);
+    CheckGazeDrag(true);
     CheckTwoFistMenu();
     std::cout << "Pointer aim, window grabs, gaze, and two-fist menu checks passed\n";
 }

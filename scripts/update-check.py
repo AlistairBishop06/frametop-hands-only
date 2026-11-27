@@ -26,6 +26,7 @@ print("Retest PAUSE_IN_GAMES in SteamVR Home/Aurora, a local game, and a streame
 print("Retest Direct Touch overlay discovery, GetTransformForOverlayCoordinates, and fingertip contact on the dashboard and floated panels after a SteamVR update.")
 print("Retest Interaction Mode switching, head-pointed gaze hover on the dashboard and floating windows, pinch clicks from either hand, and physical-controller handoff.")
 print("Retest that Gaze Assisted shortens the beam at the hovered panel and pinch still clicks the dot when moving between nearby and distant overlays.")
+print("Retest that the gaze beam stays out of view away from panels, and that floating windows follow head movement during a pinch and stay in place on release.")
 print("Retest that the optional two-fist gesture toggles the SteamVR menu once per hold and becomes ready again after both hands open.")
 print("Retest small-button clicks, small head movements while holding the hand still, and deliberate pointer sweeps. Then move and tilt a floated panel and check that it keeps its position and tilt after release.")
 sys.exit(0 if all(checks.values()) else 1)
